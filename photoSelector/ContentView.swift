@@ -215,6 +215,11 @@ struct ContentView: View {
     }
     
     func openPreviewWindow(for photo: PhotoItem) {
+        // Close existing window if any
+        if let existingWindow = previewWindow {
+            existingWindow.close()
+        }
+        
         let previewView = ImagePreviewWindowView(photo: photo, onClose: {
             showImagePreview = false
         })
@@ -232,6 +237,7 @@ struct ContentView: View {
         // Set up delegate to save window size on changes and handle key events
         let windowDelegate = PreviewWindowDelegate(onClose: {
             showImagePreview = false
+            self.previewWindow = nil // Clear reference on close
         })
         window.delegate = windowDelegate
         
@@ -400,15 +406,25 @@ struct SelectedPhotoPreview: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 
-                // Filename at bottom
+                // Filename and date at bottom
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
-                    Text(photo.filename)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                    HStack(spacing: 8) {
+                        Text(photo.filename)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        
+                        if let date = photo.creationDate {
+                            Text(formatDate(date))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 }
             } else {
                 VStack {
@@ -527,49 +543,30 @@ struct GroupBThumbnail: View {
 struct ImagePreviewWindowView: View {
     let photo: PhotoItem
     let onClose: () -> Void
-    
+
     var body: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                // Image content that resizes with window
-                AsyncImage(url: photo.url) { phase in
-                    switch phase {
-                    case .empty:
-                        ZStack {
-                            Color.black.opacity(0.1)
-                            ProgressView()
-                        }
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: geometry.size.width, height: geometry.size.height - 40)
-                    case .failure:
-                        VStack {
-                            Image(systemName: "exclamationmark.triangle")
-                                .font(.largeTitle)
-                                .foregroundStyle(.secondary)
-                            Text("Failed to load image")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    @unknown default:
-                        EmptyView()
-                    }
-                }
+        VStack(spacing: 0) {
+            // Zoomable image view
+            ZoomableAsyncImageView(url: photo.url)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            
+            // Bottom bar with filename and date
+            HStack(spacing: 8) {
+                Text(photo.filename)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 
-                // Bottom bar with filename
-                HStack {
-                    Text(photo.filename)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer()
+                if let date = photo.creationDate {
+                    Text("(\(formatDate(date)))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
-                .padding(8)
-                .background(Material.bar)
+                
+                Spacer()
             }
+            .padding(8)
+            .background(Material.bar)
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
@@ -580,10 +577,18 @@ struct ImagePreviewWindowView: View {
                     Image(systemName: "xmark.circle")
                 }
                 .keyboardShortcut("w", modifiers: .command)
-                .help("Close (⌘W or Esc)")
+                .help("Close (⌘W or Enter)")
             }
         }
     }
+}
+
+// Helper function to format date
+private func formatDate(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "ja_JP")
+    formatter.dateFormat = "yyyy年M月d日 H時m分s秒"
+    return formatter.string(from: date)
 }
 
 // Window size management for preview window
@@ -659,4 +664,111 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
 
 #Preview {
     ContentView()
+}
+
+// MARK: - Centering Clip View
+
+// A custom NSClipView that centers its document view if it's smaller than the clip view.
+class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        if let documentView = self.documentView {
+            if rect.size.width > documentView.frame.size.width {
+                rect.origin.x = (documentView.frame.width - rect.width) / 2
+            }
+            if rect.size.height > documentView.frame.size.height {
+                rect.origin.y = (documentView.frame.height - rect.height) / 2
+            }
+        }
+        return rect
+    }
+}
+
+// MARK: - Zoomable Image View (NSViewRepresentable)
+
+struct ZoomableAsyncImageView: NSViewRepresentable {
+    var url: URL
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.backgroundColor = .clear
+
+        let imageView = NSImageView()
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Use the custom centering clip view
+        let clipView = CenteringClipView()
+        clipView.documentView = imageView
+        clipView.backgroundColor = .clear
+        scrollView.contentView = clipView
+        clipView.documentView = imageView
+        clipView.backgroundColor = .clear
+        
+        scrollView.contentView = clipView
+        
+        // Add gesture for double-click to reset zoom
+        let doubleClickGesture = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleClick))
+        doubleClickGesture.numberOfClicksRequired = 2
+        imageView.addGestureRecognizer(doubleClickGesture)
+        
+        // Configure magnification
+        scrollView.allowsMagnification = true
+        scrollView.minMagnification = 1.0
+        scrollView.maxMagnification = 10.0
+        
+        context.coordinator.imageView = imageView
+        context.coordinator.loadImage(from: url)
+        
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        if context.coordinator.currentURL != url {
+            context.coordinator.loadImage(from: url)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject {
+        var parent: ZoomableAsyncImageView
+        weak var imageView: NSImageView?
+        var currentURL: URL?
+
+        init(_ parent: ZoomableAsyncImageView) {
+            self.parent = parent
+        }
+        
+        func loadImage(from url: URL) {
+            self.currentURL = url
+            DispatchQueue.global().async {
+                if let image = NSImage(contentsOf: url) {
+                    DispatchQueue.main.async {
+                        guard let imageView = self.imageView else { return }
+                        imageView.image = image
+                        // Set frame size to image size for centering logic to work
+                        imageView.frame.size = image.size
+                        self.resetZoom()
+                    }
+                }
+            }
+        }
+
+        @objc func handleDoubleClick(gesture: NSClickGestureRecognizer) {
+            resetZoom()
+        }
+        
+        private func resetZoom() {
+            guard let scrollView = imageView?.enclosingScrollView else { return }
+            // Use animator to get a smooth zoom-out effect
+            scrollView.animator().magnification = 1.0
+        }
+    }
 }
