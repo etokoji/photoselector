@@ -14,7 +14,18 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var isProcessing: Bool = false
     @Published var errorMessage: String?
     @Published var showError: Bool = false
-    @Published var thumbnailSize: Double = 150 // Default thumbnail size
+    @Published var thumbnailSize: Double {
+        didSet {
+            UserDefaults.standard.set(thumbnailSize, forKey: "ThumbnailSize")
+        }
+    }
+    @Published var selectedPhotoID: UUID? = nil // Currently selected photo for keyboard navigation
+    
+    init() {
+        // Restore saved thumbnail size or use default
+        let savedSize = UserDefaults.standard.double(forKey: "ThumbnailSize")
+        self.thumbnailSize = savedSize > 0 ? savedSize : 150
+    }
     
     // Load photos from a selected folder
     func loadPhotos(from folderURL: URL) {
@@ -35,6 +46,8 @@ class PhotoSorterViewModel: ObservableObject {
             
             DispatchQueue.main.async {
                 self.photos = imageFiles.map { PhotoItem(url: $0) }
+                // Select first photo by default
+                self.selectedPhotoID = self.photos.first?.id
             }
         } catch {
             self.errorMessage = "Failed to load photos: \(error.localizedDescription)"
@@ -67,6 +80,48 @@ class PhotoSorterViewModel: ObservableObject {
         for i in 0..<photos.count {
             photos[i].status = .unknown
         }
+    }
+    
+    // Keyboard navigation methods
+    func moveSelection(direction: NavigationDirection, columns: Int) {
+        guard !photos.isEmpty else { return }
+        
+        // If no selection, select first photo
+        guard let currentID = selectedPhotoID,
+              let currentIndex = photos.firstIndex(where: { $0.id == currentID }) else {
+            selectedPhotoID = photos.first?.id
+            return
+        }
+        
+        var newIndex = currentIndex
+        
+        switch direction {
+        case .left:
+            newIndex = max(0, currentIndex - 1)
+        case .right:
+            newIndex = min(photos.count - 1, currentIndex + 1)
+        case .up:
+            newIndex = max(0, currentIndex - columns)
+        case .down:
+            newIndex = min(photos.count - 1, currentIndex + columns)
+        }
+        
+        if newIndex != currentIndex && newIndex >= 0 && newIndex < photos.count {
+            selectedPhotoID = photos[newIndex].id
+        }
+    }
+    
+    func toggleSelectedPhotoStatus() {
+        guard let selectedID = selectedPhotoID,
+              let photo = photos.first(where: { $0.id == selectedID }) else {
+            return
+        }
+        toggleStatus(for: photo)
+    }
+    
+    var selectedPhoto: PhotoItem? {
+        guard let selectedID = selectedPhotoID else { return nil }
+        return photos.first(where: { $0.id == selectedID })
     }
     
     // Execute move for Group B items
@@ -117,4 +172,8 @@ class PhotoSorterViewModel: ObservableObject {
             }
         }
     }
+}
+
+enum NavigationDirection {
+    case left, right, up, down
 }
