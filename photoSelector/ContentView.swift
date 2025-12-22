@@ -229,8 +229,10 @@ struct ContentView: View {
         window.setContentSize(savedSize)
         window.center()
         
-        // Set up delegate to save window size on changes
-        let windowDelegate = PreviewWindowDelegate()
+        // Set up delegate to save window size on changes and handle key events
+        let windowDelegate = PreviewWindowDelegate(onClose: {
+            showImagePreview = false
+        })
         window.delegate = windowDelegate
         
         window.makeKeyAndOrderFront(nil)
@@ -569,11 +571,6 @@ struct ImagePreviewWindowView: View {
                 .background(Material.bar)
             }
         }
-        .onKeyPress(.escape) {
-            onClose()
-            NSApp.keyWindow?.close()
-            return .handled
-        }
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button(action: {
@@ -616,8 +613,44 @@ class PreviewWindowSizeManager {
     }
 }
 
-// Window delegate to track size changes
+// Window delegate to track size changes and handle key events
 class PreviewWindowDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+    private var localMonitor: Any?
+    
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        super.init()
+    }
+    
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        
+        // Set up local event monitor for Enter key
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
+            guard let self = self, let window = window else { return event }
+            
+            // Check if this event is for our window
+            if event.window == window {
+                // Check for Return key (keyCode 36 or 76)
+                if event.keyCode == 36 || event.keyCode == 76 {
+                    self.onClose()
+                    window.close()
+                    return nil // Consume the event
+                }
+            }
+            return event
+        }
+    }
+    
+    func windowWillClose(_ notification: Notification) {
+        // Clean up event monitor
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMonitor = nil
+        }
+    }
+    
     func windowDidResize(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         PreviewWindowSizeManager.shared.saveWindowSize(window.frame.size)
