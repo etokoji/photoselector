@@ -256,25 +256,19 @@ struct PhotoGridItem: View {
     let photo: PhotoItem
     let thumbnailSize: Double
     var isSelected: Bool = false
+    @State private var thumbnail: NSImage?
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            AsyncImage(url: photo.url) { phase in
-                switch phase {
-                case .empty:
+            Group {
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
                     Rectangle()
                         .fill(Color.gray.opacity(0.2))
                         .overlay(ProgressView())
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                case .failure:
-                    Rectangle()
-                        .fill(Color.red.opacity(0.2))
-                        .overlay(Image(systemName: "exclamationmark.triangle"))
-                @unknown default:
-                    EmptyView()
                 }
             }
             .frame(height: thumbnailSize)
@@ -303,6 +297,16 @@ struct PhotoGridItem: View {
             }
         }
         .opacity(photo.status == .groupB ? 0.5 : 1.0)
+        .onAppear(perform: loadThumbnail)
+        .onChange(of: thumbnailSize) { oldValue, newValue in
+            loadThumbnail()
+        }
+    }
+    
+    private func loadThumbnail() {
+        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: thumbnailSize) { image in
+            self.thumbnail = image
+        }
     }
     
     var borderColor: Color {

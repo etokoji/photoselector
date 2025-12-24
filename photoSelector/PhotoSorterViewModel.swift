@@ -7,6 +7,72 @@
 
 import SwiftUI
 import Combine
+import ImageIO
+
+// MARK: - Thumbnail Generator
+class ThumbnailGenerator {
+    static let shared = ThumbnailGenerator()
+    
+    private class CacheKey: NSObject {
+        let url: URL
+        let size: CGFloat
+
+        init(url: URL, size: CGFloat) {
+            self.url = url
+            self.size = size
+        }
+
+        override func isEqual(_ object: Any?) -> Bool {
+            guard let other = object as? CacheKey else { return false }
+            return url == other.url && size == other.size
+        }
+
+        override var hash: Int {
+            var hasher = Hasher()
+            hasher.combine(url)
+            hasher.combine(size)
+            return hasher.finalize()
+        }
+    }
+    
+    private let cache = NSCache<CacheKey, NSImage>()
+    private let queue = DispatchQueue(label: "dev.etokoji.thumbnailgenerator", qos: .userInitiated)
+
+    private init() {}
+
+    func thumbnail(for url: URL, size: CGFloat, completion: @escaping (NSImage?) -> Void) {
+        let cacheKey = CacheKey(url: url, size: size)
+        if let cachedImage = cache.object(forKey: cacheKey) {
+            completion(cachedImage)
+            return
+        }
+
+        queue.async {
+            guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: size * 2 // Use 2x for Retina displays
+            ]
+
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+
+            let nsImage = NSImage(cgImage: cgImage, size: .zero)
+            self.cache.setObject(nsImage, forKey: cacheKey)
+            
+            DispatchQueue.main.async {
+                completion(nsImage)
+            }
+        }
+    }
+}
 
 class PhotoSorterViewModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
