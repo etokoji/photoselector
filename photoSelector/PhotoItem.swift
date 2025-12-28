@@ -1,9 +1,12 @@
-//
-//  PhotoItem.swift
-//  photoSelector
-//
-//  Created by Antigravity on 2025/12/01.
-//
+// MARK: - File System Item for Tree View
+struct FileSystemItem: Identifiable, Hashable {
+    let id: URL
+    let name: String
+    var children: [FileSystemItem]?
+    let isFolder: Bool
+}
+
+// MARK: - Photo Item for Grid View
 
 import Foundation
 import SwiftUI

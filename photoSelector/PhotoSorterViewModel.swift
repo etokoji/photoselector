@@ -87,10 +87,70 @@ class PhotoSorterViewModel: ObservableObject {
     }
     @Published var selectedPhotoID: UUID? = nil // Currently selected photo for keyboard navigation
     
+    // For Folder Tree
+    @Published var folderTree: [FileSystemItem] = []
+    @Published var selectedFolderURL: URL?
+    
     init() {
         // Restore saved thumbnail size or use default
         let savedSize = UserDefaults.standard.double(forKey: "ThumbnailSize")
         self.thumbnailSize = savedSize > 0 ? savedSize : 150
+    }
+    
+    // Scan the root folder and build the folder tree
+    func buildFolderTree(from rootURL: URL) {
+        let fileManager = FileManager.default
+        var items: [FileSystemItem] = []
+        
+        do {
+            let contents = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: .skipsHiddenFiles)
+            
+            for url in contents {
+                let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .nameKey])
+                let isDirectory = resourceValues.isDirectory ?? false
+                let name = resourceValues.name ?? url.lastPathComponent
+                
+                if isDirectory {
+                    let children = buildSubTree(from: url)
+                    items.append(FileSystemItem(id: url, name: name, children: children, isFolder: true))
+                }
+            }
+        } catch {
+            self.errorMessage = "Failed to scan folder: \(error.localizedDescription)"
+            self.showError = true
+        }
+        
+        // Add the root folder itself at the top
+        self.folderTree = [
+            FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)
+        ]
+        
+        // Initially select the root folder
+        if selectedFolderURL == nil {
+            self.selectedFolderURL = rootURL
+        }
+    }
+    
+    private func buildSubTree(from folderURL: URL) -> [FileSystemItem]? {
+        let fileManager = FileManager.default
+        var children: [FileSystemItem] = []
+        
+        do {
+            let contents = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: .skipsHiddenFiles)
+            
+            for url in contents {
+                let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .nameKey])
+                if let isDirectory = resourceValues.isDirectory, isDirectory {
+                    let name = resourceValues.name ?? url.lastPathComponent
+                    let subChildren = buildSubTree(from: url)
+                    children.append(FileSystemItem(id: url, name: name, children: subChildren, isFolder: true))
+                }
+            }
+        } catch {
+            // Silently ignore errors for subfolders, or handle as needed
+        }
+        
+        return children.isEmpty ? nil : children
     }
     
     // Load photos from a selected folder

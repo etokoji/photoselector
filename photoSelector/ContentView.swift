@@ -83,59 +83,41 @@ struct ContentView: View {
             
             // Main Content with Side Panel (use native NSSplitView via representable on macOS)
 #if os(macOS)
+            // Nested SplitView for 3-pane layout
             SplitViewRepresentable(
-                left:
-                    GeometryReader { geometry in
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVGrid(columns: columns, spacing: 10) {
-                                    ForEach(viewModel.photos) { photo in
-                                        PhotoGridItem(
-                                            photo: photo,
-                                            thumbnailSize: viewModel.thumbnailSize,
-                                            isSelected: viewModel.selectedPhotoID == photo.id
-                                        )
-                                        .id(photo.id)
-                                        .onTapGesture {
-                                            viewModel.selectedPhotoID = photo.id
-                                            viewModel.toggleStatus(for: photo)
-                                        }
-                                    }
-                                }
-                                .padding()
-                            }
-                            .onAppear {
-                                actualGridWidth = geometry.size.width
-                            }
-                            .onChange(of: geometry.size.width) { oldValue, newValue in
-                                actualGridWidth = newValue
-                            }
-                            .onChange(of: viewModel.selectedPhotoID) { oldValue, newValue in
-                                if let newValue = newValue {
-                                    withAnimation {
-                                        proxy.scrollTo(newValue, anchor: .center)
-                                    }
-                                }
-                            }
+                left: FolderTreeView(folderTree: viewModel.folderTree, selectedFolderURL: $viewModel.selectedFolderURL)
+                    .frame(minWidth: 150, idealWidth: 250),
+                right: SplitViewRepresentable(
+                    left: PhotoGridView(
+                        photos: viewModel.photos,
+                        columns: columns,
+                        thumbnailSize: viewModel.thumbnailSize,
+                        selectedPhotoID: $viewModel.selectedPhotoID,
+                        isGridFocused: _isGridFocused,
+                        actualGridWidth: $actualGridWidth,
+                        onToggleStatus: { photo in
+                            viewModel.toggleStatus(for: photo)
                         }
-                    }
-                    .focusable()
-                    .focusEffectDisabled()
-                    .focused($isGridFocused)
-                    .onAppear {
-                        isGridFocused = true
-                    },
-                right: RightSidePanel(
-                    selectedPhoto: viewModel.selectedPhoto,
-                    discardedPhotos: viewModel.photos.filter { $0.status == .groupB }
+                    )
+                    .frame(minWidth: 400),
+                    right: RightSidePanel(
+                        selectedPhoto: viewModel.selectedPhoto,
+                        discardedPhotos: viewModel.photos.filter { $0.status == .groupB }
+                    )
+                    .frame(minWidth: 200)
                 ),
-                minLeft: 400,
-                minRight: 200
+                minLeft: 150,
+                minRight: 600
             )
-            .frame(minWidth: 400)
+            .frame(minWidth: 800)
             .onKeyPress(.upArrow) {
                 viewModel.moveSelection(direction: .up, columns: actualColumns)
                 return .handled
+            }
+            .onChange(of: viewModel.selectedFolderURL) { oldValue, newValue in
+                if let url = newValue {
+                    viewModel.loadPhotos(from: url)
+                }
             }
             .onKeyPress(.downArrow) {
                 viewModel.moveSelection(direction: .down, columns: actualColumns)
@@ -209,7 +191,7 @@ struct ContentView: View {
         
         if panel.runModal() == .OK {
             if let url = panel.url {
-                viewModel.loadPhotos(from: url)
+                viewModel.buildFolderTree(from: url)
             }
         }
     }
@@ -248,8 +230,79 @@ struct ContentView: View {
         previewWindowDelegate = windowDelegate
     }
     
-    @State private var previewWindow: NSWindow?
+@State private var previewWindow: NSWindow?
     @State private var previewWindowDelegate: PreviewWindowDelegate?
+}
+
+// MARK: - Subviews for ContentView
+
+struct FolderTreeView: View {
+    let folderTree: [FileSystemItem]
+    @Binding var selectedFolderURL: URL?
+
+    var body: some View {
+        List(folderTree, children: \.children, selection: $selectedFolderURL) { item in
+            HStack {
+                Image(systemName: item.isFolder ? "folder" : "photo")
+                Text(item.name)
+            }
+            .padding(.vertical, 2)
+        }
+        .listStyle(SidebarListStyle())
+    }
+}
+
+struct PhotoGridView: View {
+    let photos: [PhotoItem]
+    let columns: [GridItem]
+    let thumbnailSize: Double
+    @Binding var selectedPhotoID: UUID?
+    @FocusState var isGridFocused: Bool
+    @Binding var actualGridWidth: CGFloat
+    let onToggleStatus: (PhotoItem) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 10) {
+                        ForEach(photos) { photo in
+                            PhotoGridItem(
+                                photo: photo,
+                                thumbnailSize: thumbnailSize,
+                                isSelected: selectedPhotoID == photo.id
+                            )
+                            .id(photo.id)
+                            .onTapGesture {
+                                selectedPhotoID = photo.id
+                                onToggleStatus(photo)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+                .onAppear {
+                    actualGridWidth = geometry.size.width
+                }
+                .onChange(of: geometry.size.width) { oldValue, newValue in
+                    actualGridWidth = newValue
+                }
+                .onChange(of: selectedPhotoID) { oldValue, newValue in
+                    if let newValue = newValue {
+                        withAnimation {
+                            proxy.scrollTo(newValue, anchor: .center)
+                        }
+                    }
+                }
+            }
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isGridFocused)
+        .onAppear {
+            isGridFocused = true
+        }
+    }
 }
 
 struct PhotoGridItem: View {
