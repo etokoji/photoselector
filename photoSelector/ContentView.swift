@@ -96,17 +96,19 @@ struct ContentView: View {
                         selectedPhotoIDs: $viewModel.selectedPhotoIDs,
                         isGridFocused: _isGridFocused,
                         actualGridWidth: $actualGridWidth,
-                        onSelect: { id, orderedIDs, isCommand, isShift in
+                        onSelect: { id, orderedIDs, isCommand, isShift, context in
                             viewModel.applySelectionClick(
                                 id: id,
                                 orderedIDs: orderedIDs,
                                 isCommandPressed: isCommand,
-                                isShiftPressed: isShift
+                                isShiftPressed: isShift,
+                                context: context
                             )
                         },
                         onSetStatusForSelection: { status in
                             viewModel.setStatusForSelection(status)
-                        }
+                        },
+                        isContextActive: viewModel.selectionContext == .grid
                     )
                     .frame(minWidth: 400),
                     right: RightSidePanel(
@@ -115,17 +117,19 @@ struct ContentView: View {
                         discardedPhotos: viewModel.photos.filter { $0.status == .groupB },
                         primarySelectedPhotoID: $viewModel.primarySelectedPhotoID,
                         selectedPhotoIDs: $viewModel.selectedPhotoIDs,
-                        onSelect: { id, orderedIDs, isCommand, isShift in
+                        onSelect: { id, orderedIDs, isCommand, isShift, context in
                             viewModel.applySelectionClick(
                                 id: id,
                                 orderedIDs: orderedIDs,
                                 isCommandPressed: isCommand,
-                                isShiftPressed: isShift
+                                isShiftPressed: isShift,
+                                context: context
                             )
                         },
                         onSetStatusForSelection: { status in
                             viewModel.setStatusForSelection(status)
-                        }
+                        },
+                        activeContext: viewModel.selectionContext
                     )
                     .frame(minWidth: 200),
                     minLeft: 400,
@@ -189,10 +193,11 @@ struct ContentView: View {
                                         )
                                     }
                                 },
-                                onSetStatusForSelection: { status in
-                                    viewModel.setStatusForSelection(status)
-                                }
-                            )
+                        onSetStatusForSelection: { status in
+                            viewModel.setStatusForSelection(status)
+                        },
+                        activeContext: viewModel.selectionContext
+                    )
                             .onTapGesture {
                                 viewModel.applySelectionClick(
                                     id: photo.id,
@@ -305,40 +310,19 @@ struct PhotoGridView: View {
     @Binding var selectedPhotoIDs: Set<UUID>
     @FocusState var isGridFocused: Bool
     @Binding var actualGridWidth: CGFloat
-    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
-
+    var isContextActive: Bool = false
+    
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 10) {
-                        ForEach(photos) { photo in
-                            PhotoGridItem(
-                                photo: photo,
-                                thumbnailSize: thumbnailSize,
-                                isSelected: selectedPhotoIDs.contains(photo.id),
-                                isPrimary: primarySelectedPhotoID == photo.id,
-                                onEnsureSelectedForContextMenu: {
-                                    if !selectedPhotoIDs.contains(photo.id) {
-                                        onSelect(photo.id, photos.map { $0.id }, false, false)
-                                    }
-                                },
-                                onSetStatusForSelection: { status in
-                                    onSetStatusForSelection(status)
-                                }
-                            )
-                            .id(photo.id)
-                            .onTapGesture {
-                                let flags = NSEvent.modifierFlags
-                                let isCommand = flags.contains(.command)
-                                let isShift = flags.contains(.shift)
-                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
-                            }
-                        }
-                    }
+                    gridContent
                     .padding()
                 }
+                .background(isContextActive ? Color.accentColor.opacity(0.1) : Color.clear)
+                .cornerRadius(8)
                 .onAppear {
                     actualGridWidth = geometry.size.width
                 }
@@ -359,6 +343,38 @@ struct PhotoGridView: View {
         .focused($isGridFocused)
         .onAppear {
             isGridFocused = true
+        }
+    }
+
+    var gridContent: some View {
+        LazyVGrid(columns: columns, spacing: 10) {
+            ForEach(photos) { photo in
+                itemContent(for: photo)
+            }
+        }
+    }
+
+    func itemContent(for photo: PhotoItem) -> some View {
+        PhotoGridItem(
+            photo: photo,
+            thumbnailSize: thumbnailSize,
+            isSelected: selectedPhotoIDs.contains(photo.id),
+            isPrimary: primarySelectedPhotoID == photo.id,
+            onEnsureSelectedForContextMenu: {
+                if !selectedPhotoIDs.contains(photo.id) {
+                    onSelect(photo.id, photos.map { $0.id }, false, false, .grid)
+                }
+            },
+            onSetStatusForSelection: { status in
+                onSetStatusForSelection(status)
+            }
+        )
+        .id(photo.id)
+        .onTapGesture {
+            let flags = NSEvent.modifierFlags
+            let isCommand = flags.contains(.command)
+            let isShift = flags.contains(.shift)
+            onSelect(photo.id, photos.map { $0.id }, isCommand, isShift, .grid)
         }
     }
 }
@@ -473,8 +489,9 @@ struct RightSidePanel: View {
     let discardedPhotos: [PhotoItem]
     @Binding var primarySelectedPhotoID: UUID?
     @Binding var selectedPhotoIDs: Set<UUID>
-    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
+    var activeContext: SelectionContext = .grid
     
     var body: some View {
 #if os(macOS)
@@ -486,14 +503,16 @@ struct RightSidePanel: View {
                     primarySelectedPhotoID: $primarySelectedPhotoID,
                     selectedPhotoIDs: $selectedPhotoIDs,
                     onSelect: onSelect,
-                    onSetStatusForSelection: onSetStatusForSelection
+                    onSetStatusForSelection: onSetStatusForSelection,
+                    isContextActive: activeContext == .keep
                 ),
                 right: GroupBSidePanel(
                     photos: discardedPhotos,
                     primarySelectedPhotoID: $primarySelectedPhotoID,
                     selectedPhotoIDs: $selectedPhotoIDs,
                     onSelect: onSelect,
-                    onSetStatusForSelection: onSetStatusForSelection
+                    onSetStatusForSelection: onSetStatusForSelection,
+                    isContextActive: activeContext == .discard
                 ),
                 minLeft: 100,
                 minRight: 100,
@@ -623,8 +642,12 @@ struct GroupASidePanel: View {
     let photos: [PhotoItem]
     @Binding var primarySelectedPhotoID: UUID?
     @Binding var selectedPhotoIDs: Set<UUID>
-    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
+    var isContextActive: Bool = false
+    
+    // Add ViewModel environment object to update column count
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -665,32 +688,66 @@ struct GroupASidePanel: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 4) {
-                        ForEach(photos) { photo in
-                            GroupAThumbnail(
-                                photo: photo,
-                                isSelected: selectedPhotoIDs.contains(photo.id),
-                                isPrimary: primarySelectedPhotoID == photo.id,
-                                onEnsureSelectedForContextMenu: {
-                                    if !selectedPhotoIDs.contains(photo.id) {
-                                        onSelect(photo.id, photos.map { $0.id }, false, false)
+                GeometryReader { geometry in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVGrid(columns: columns, spacing: 4) {
+                                ForEach(photos) { photo in
+                                    GroupAThumbnail(
+                                        photo: photo,
+                                        isSelected: selectedPhotoIDs.contains(photo.id),
+                                        isPrimary: primarySelectedPhotoID == photo.id,
+                                        onEnsureSelectedForContextMenu: {
+                                            if !selectedPhotoIDs.contains(photo.id) {
+                                                onSelect(photo.id, photos.map { $0.id }, false, false, .keep)
+                                            }
+                                        },
+                                        onSetStatusForSelection: { status in
+                                            onSetStatusForSelection(status)
+                                        }
+                                    )
+                                    .id(photo.id)
+                                    .onTapGesture {
+                                        let flags = NSEvent.modifierFlags
+                                        let isCommand = flags.contains(.command)
+                                        let isShift = flags.contains(.shift)
+                                        onSelect(photo.id, photos.map { $0.id }, isCommand, isShift, .keep)
                                     }
-                                },
-                                onSetStatusForSelection: { status in
-                                    onSetStatusForSelection(status)
                                 }
-                            )
-                            .onTapGesture {
-                                let flags = NSEvent.modifierFlags
-                                let isCommand = flags.contains(.command)
-                                let isShift = flags.contains(.shift)
-                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
+                            }
+                            .padding(4)
+                        }
+                        .onChange(of: geometry.size.width) { _, newValue in
+                            let itemWidth: CGFloat = 84 // 80 min + 4 spacing
+                            let padding: CGFloat = 8 // approximate padding
+                            let availableWidth = newValue - padding
+                            let count = max(1, Int(availableWidth / itemWidth))
+                            DispatchQueue.main.async {
+                                if viewModel.groupAColumns != count {
+                                    viewModel.groupAColumns = count
+                                }
+                            }
+                        }
+                        .onAppear {
+                            let itemWidth: CGFloat = 84
+                            let padding: CGFloat = 8
+                            let availableWidth = geometry.size.width - padding
+                            let count = max(1, Int(availableWidth / itemWidth))
+                            if viewModel.groupAColumns != count {
+                                viewModel.groupAColumns = count
+                            }
+                        }
+                        .onChange(of: primarySelectedPhotoID) { _, newValue in
+                            if let newValue = newValue, isContextActive {
+                                withAnimation {
+                                    proxy.scrollTo(newValue, anchor: .center)
+                                }
                             }
                         }
                     }
-                    .padding(4)
                 }
+                .background(isContextActive ? Color.accentColor.opacity(0.1) : Color.clear)
+                .cornerRadius(8)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -769,8 +826,11 @@ struct GroupBSidePanel: View {
     let photos: [PhotoItem]
     @Binding var primarySelectedPhotoID: UUID?
     @Binding var selectedPhotoIDs: Set<UUID>
-    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
+    var isContextActive: Bool = false
+    
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -811,32 +871,66 @@ struct GroupBSidePanel: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 4) {
-                        ForEach(photos) { photo in
-                            GroupBThumbnail(
-                                photo: photo,
-                                isSelected: selectedPhotoIDs.contains(photo.id),
-                                isPrimary: primarySelectedPhotoID == photo.id,
-                                onEnsureSelectedForContextMenu: {
-                                    if !selectedPhotoIDs.contains(photo.id) {
-                                        onSelect(photo.id, photos.map { $0.id }, false, false)
+                GeometryReader { geometry in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVGrid(columns: columns, spacing: 4) {
+                                ForEach(photos) { photo in
+                                    GroupBThumbnail(
+                                        photo: photo,
+                                        isSelected: selectedPhotoIDs.contains(photo.id),
+                                        isPrimary: primarySelectedPhotoID == photo.id,
+                                        onEnsureSelectedForContextMenu: {
+                                            if !selectedPhotoIDs.contains(photo.id) {
+                                                onSelect(photo.id, photos.map { $0.id }, false, false, .discard)
+                                            }
+                                        },
+                                        onSetStatusForSelection: { status in
+                                            onSetStatusForSelection(status)
+                                        }
+                                    )
+                                    .id(photo.id)
+                                    .onTapGesture {
+                                        let flags = NSEvent.modifierFlags
+                                        let isCommand = flags.contains(.command)
+                                        let isShift = flags.contains(.shift)
+                                        onSelect(photo.id, photos.map { $0.id }, isCommand, isShift, .discard)
                                     }
-                                },
-                                onSetStatusForSelection: { status in
-                                    onSetStatusForSelection(status)
                                 }
-                            )
-                            .onTapGesture {
-                                let flags = NSEvent.modifierFlags
-                                let isCommand = flags.contains(.command)
-                                let isShift = flags.contains(.shift)
-                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
+                            }
+                            .padding(4)
+                        }
+                        .onChange(of: geometry.size.width) { _, newValue in
+                            let itemWidth: CGFloat = 84 // 80 min + 4 spacing
+                            let padding: CGFloat = 8 // approximate padding
+                            let availableWidth = newValue - padding
+                            let count = max(1, Int(availableWidth / itemWidth))
+                            DispatchQueue.main.async {
+                                if viewModel.groupBColumns != count {
+                                    viewModel.groupBColumns = count
+                                }
+                            }
+                        }
+                        .onAppear {
+                            let itemWidth: CGFloat = 84
+                            let padding: CGFloat = 8
+                            let availableWidth = geometry.size.width - padding
+                            let count = max(1, Int(availableWidth / itemWidth))
+                            if viewModel.groupBColumns != count {
+                                viewModel.groupBColumns = count
+                            }
+                        }
+                        .onChange(of: primarySelectedPhotoID) { _, newValue in
+                            if let newValue = newValue, isContextActive {
+                                withAnimation {
+                                    proxy.scrollTo(newValue, anchor: .center)
+                                }
                             }
                         }
                     }
-                    .padding(4)
                 }
+                .background(isContextActive ? Color.accentColor.opacity(0.1) : Color.clear)
+                .cornerRadius(8)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))

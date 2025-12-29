@@ -74,6 +74,13 @@ class ThumbnailGenerator {
     }
 }
 
+
+enum SelectionContext {
+    case grid
+    case keep
+    case discard
+}
+
 class PhotoSorterViewModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
     @Published var currentFolder: URL?
@@ -91,10 +98,15 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var primarySelectedPhotoID: UUID? = nil
     @Published var selectedPhotoIDs: Set<UUID> = []
     private var selectionAnchorPhotoID: UUID? = nil
+    @Published var selectionContext: SelectionContext = .grid
     
     // For Folder Tree
     @Published var folderTree: [FileSystemItem] = []
     @Published var selectedFolderURL: URL?
+    
+    // Column counts for keyboard navigation
+    @Published var groupAColumns: Int = 2
+    @Published var groupBColumns: Int = 2
     
     init() {
         // Restore saved thumbnail size or use default
@@ -182,10 +194,12 @@ class PhotoSorterViewModel: ObservableObject {
                     self.primarySelectedPhotoID = first
                     self.selectedPhotoIDs = [first]
                     self.selectionAnchorPhotoID = first
+                    self.selectionContext = .grid
                 } else {
                     self.primarySelectedPhotoID = nil
                     self.selectedPhotoIDs = []
                     self.selectionAnchorPhotoID = nil
+                    self.selectionContext = .grid
                 }
             }
         } catch {
@@ -197,19 +211,48 @@ class PhotoSorterViewModel: ObservableObject {
     // Toggle status or set specific status
     func toggleStatus(for item: PhotoItem) {
         if let index = photos.firstIndex(where: { $0.id == item.id }) {
+            let nextStatus: PhotoStatus
             switch photos[index].status {
             case .unknown:
-                photos[index].status = .groupA
+                nextStatus = .groupA
             case .groupA:
-                photos[index].status = .groupB
+                nextStatus = .groupB
             case .groupB:
-                photos[index].status = .unknown
+                nextStatus = .unknown
             }
+            setStatus(for: item, status: nextStatus)
         }
     }
     
     func setStatus(for item: PhotoItem, status: PhotoStatus) {
         if let index = photos.firstIndex(where: { $0.id == item.id }) {
+            // Check if we need to advance selection before changing status
+            // Only if we are in a filtered context (Keep or Discard) and the item will disappear from view
+            let isCurrentSelection = (primarySelectedPhotoID == item.id)
+            let willDisappear: Bool
+            switch selectionContext {
+            case .keep:
+                willDisappear = (photos[index].status == .groupA && status != .groupA)
+            case .discard:
+                willDisappear = (photos[index].status == .groupB && status != .groupB)
+            case .grid:
+                willDisappear = false
+            }
+            
+            if isCurrentSelection && willDisappear {
+                // Find next item in current context
+                let currentIDs = selectableIDs(for: selectionContext)
+                if let currentIndexInContext = currentIDs.firstIndex(of: item.id) {
+                    let nextIndex = currentIndexInContext + 1
+                    if nextIndex < currentIDs.count {
+                        selectSingle(currentIDs[nextIndex])
+                    } else {
+                        // Was last item, clear selection
+                        clearSelection()
+                    }
+                }
+            }
+            
             photos[index].status = status
         }
     }
@@ -226,9 +269,57 @@ class PhotoSorterViewModel: ObservableObject {
 
     func setStatusForSelection(_ status: PhotoStatus) {
         guard !selectedPhotoIDs.isEmpty else { return }
+        
+        // Handle selection advancement for primary item if needed
+        // Only if single selection to match simple behavior, or we could just clear selection after bulk move
+        // For bulk operations, typically we might want to select the next item after the *range* that was moved.
+        // Let's implement simple behavior: if items are removed from current view, select the next available one.
+        
+        let currentContextIDs = selectableIDs(for: selectionContext)
+        // Check if any selected item will disappear from current view
+        let disappearingIDs = selectedPhotoIDs.filter { id in
+            guard let item = photos.first(where: { $0.id == id }) else { return false }
+            switch selectionContext {
+            case .keep: return item.status == .groupA && status != .groupA
+            case .discard: return item.status == .groupB && status != .groupB
+            case .grid: return false
+            }
+        }
+        
+        var nextSelectionID: UUID? = nil
+        
+        if !disappearingIDs.isEmpty {
+            // Find the first item in the current context that is NOT in the selection (and thus not moving)
+            // starting from the position of the primary selection or the first selected item
+            if let anchorID = primarySelectedPhotoID ?? selectedPhotoIDs.first,
+               let anchorIndex = currentContextIDs.firstIndex(of: anchorID) {
+                
+                // Scan forward from anchor
+                for i in (anchorIndex + 1)..<currentContextIDs.count {
+                    if !selectedPhotoIDs.contains(currentContextIDs[i]) {
+                        nextSelectionID = currentContextIDs[i]
+                        break
+                    }
+                }
+                
+                // If not found forward, try to find one? Or just clear?
+                // Request says "select next image". If last, "unselect".
+            }
+        }
+
+        // Update statuses
         for i in 0..<photos.count {
             if selectedPhotoIDs.contains(photos[i].id) {
                 photos[i].status = status
+            }
+        }
+        
+        // Apply new selection if needed
+        if !disappearingIDs.isEmpty {
+            if let nextID = nextSelectionID {
+                selectSingle(nextID)
+            } else {
+                clearSelection()
             }
         }
     }
@@ -248,23 +339,26 @@ class PhotoSorterViewModel: ObservableObject {
     ///   - orderedIDs: the visual order of items in the pane where the click happened
     ///   - isCommandPressed: toggles selection (multi-select)
     ///   - isShiftPressed: selects a range from anchor to clicked id
-    func applySelectionClick(id: UUID, orderedIDs: [UUID], isCommandPressed: Bool, isShiftPressed: Bool) {
+    func applySelectionClick(id: UUID,
+                             orderedIDs: [UUID],
+                             isCommandPressed: Bool,
+                             isShiftPressed: Bool,
+                             context: SelectionContext) {
+        selectionContext = context
         if isShiftPressed {
             let anchor = selectionAnchorPhotoID ?? primarySelectedPhotoID ?? id
             guard let a = orderedIDs.firstIndex(of: anchor),
                   let b = orderedIDs.firstIndex(of: id)
             else {
                 // Fallback: just select the clicked item
-                primarySelectedPhotoID = id
-                selectedPhotoIDs = [id]
-                selectionAnchorPhotoID = id
+                selectSingle(id)
                 return
             }
 
             let range = a <= b ? a...b : b...a
             selectedPhotoIDs = Set(orderedIDs[range])
             primarySelectedPhotoID = id
-            // keep anchor as-is to allow repeated shift selections
+            selectionAnchorPhotoID = anchor
             return
         }
 
@@ -283,9 +377,7 @@ class PhotoSorterViewModel: ObservableObject {
         }
 
         // Normal click: single selection
-        primarySelectedPhotoID = id
-        selectedPhotoIDs = [id]
-        selectionAnchorPhotoID = id
+        selectSingle(id)
     }
 
     /// Clear current selection (does not change photo statuses).
@@ -295,18 +387,52 @@ class PhotoSorterViewModel: ObservableObject {
         selectionAnchorPhotoID = nil
     }
 
+    func selectAll(in context: SelectionContext) {
+        let ids = selectableIDs(for: context)
+        guard !ids.isEmpty else { return }
+        primarySelectedPhotoID = ids.first
+        selectedPhotoIDs = Set(ids)
+        selectionAnchorPhotoID = ids.first
+        selectionContext = context
+    }
+
+    func selectAllCurrentContext() {
+        selectAll(in: selectionContext)
+    }
+
+    var hasSelectableItemsInCurrentContext: Bool {
+        !selectableIDs(for: selectionContext).isEmpty
+    }
+
+    private func selectableIDs(for context: SelectionContext) -> [UUID] {
+        switch context {
+        case .grid:
+            return photos.map { $0.id }
+        case .keep:
+            return photos.filter { $0.status == .groupA }.map { $0.id }
+        case .discard:
+            return photos.filter { $0.status == .groupB }.map { $0.id }
+        }
+    }
+
+    private func selectSingle(_ id: UUID) {
+        primarySelectedPhotoID = id
+        selectedPhotoIDs = [id]
+        selectionAnchorPhotoID = id
+    }
+
     // MARK: - Keyboard navigation methods
     func moveSelection(direction: NavigationDirection, columns: Int) {
         guard !photos.isEmpty else { return }
         
-        // If no selection, select first photo
-        guard let currentID = primarySelectedPhotoID,
-              let currentIndex = photos.firstIndex(where: { $0.id == currentID }) else {
-            if let first = photos.first?.id {
-                primarySelectedPhotoID = first
-                selectedPhotoIDs = [first]
-                selectionAnchorPhotoID = first
-            }
+        // Use current selection context for navigation
+        let contextIDs = selectableIDs(for: selectionContext)
+        guard !contextIDs.isEmpty else { return }
+        
+        let currentID = primarySelectedPhotoID ?? contextIDs.first!
+        guard let currentIndex = contextIDs.firstIndex(of: currentID) else {
+            // Should be in the list, but if not found, select first
+            selectSingle(contextIDs.first!)
             return
         }
         
@@ -316,18 +442,28 @@ class PhotoSorterViewModel: ObservableObject {
         case .left:
             newIndex = max(0, currentIndex - 1)
         case .right:
-            newIndex = min(photos.count - 1, currentIndex + 1)
+            newIndex = min(contextIDs.count - 1, currentIndex + 1)
         case .up:
-            newIndex = max(0, currentIndex - columns)
+            // Calculate approximate row movement
+            let effectiveColumns: Int
+            switch selectionContext {
+            case .grid: effectiveColumns = columns
+            case .keep: effectiveColumns = groupAColumns
+            case .discard: effectiveColumns = groupBColumns
+            }
+            newIndex = max(0, currentIndex - effectiveColumns)
         case .down:
-            newIndex = min(photos.count - 1, currentIndex + columns)
+            let effectiveColumns: Int
+            switch selectionContext {
+            case .grid: effectiveColumns = columns
+            case .keep: effectiveColumns = groupAColumns
+            case .discard: effectiveColumns = groupBColumns
+            }
+            newIndex = min(contextIDs.count - 1, currentIndex + effectiveColumns)
         }
         
-        if newIndex != currentIndex && newIndex >= 0 && newIndex < photos.count {
-            let id = photos[newIndex].id
-            primarySelectedPhotoID = id
-            selectedPhotoIDs = [id]
-            selectionAnchorPhotoID = id
+        if newIndex != currentIndex && newIndex >= 0 && newIndex < contextIDs.count {
+            selectSingle(contextIDs[newIndex])
         }
     }
     
