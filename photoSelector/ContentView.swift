@@ -604,7 +604,7 @@ struct SelectedPhotoPreview: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 
-                // Filename and date at bottom
+                // Filename, date, and status at bottom
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
                     HStack(spacing: 8) {
@@ -620,6 +620,30 @@ struct SelectedPhotoPreview: View {
                         }
                         
                         Spacer()
+                        
+                        // Status Badge - only show if not unknown, but always reserve space
+                        if photo.status != .unknown {
+                            HStack(spacing: 4) {
+                                Image(systemName: photo.status == .groupA ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                Text(photo.status == .groupA ? "採用" : "没")
+                                    .font(.caption2)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(photo.status == .groupA ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                            .foregroundStyle(photo.status == .groupA ? .green : .red)
+                            .cornerRadius(4)
+                        } else {
+                            // Reserve space even when status is unknown
+                            HStack(spacing: 4) {
+                                Image(systemName: "circle.fill")
+                                Text("未分類")
+                                    .font(.caption2)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .opacity(0)
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
