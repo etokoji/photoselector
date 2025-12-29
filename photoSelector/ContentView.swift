@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var showImagePreview = false
     @FocusState private var isGridFocused: Bool
     @State private var actualGridWidth: CGFloat = 800
+    @State private var previewWindow: NSWindow?
+    @State private var previewWindowDelegate: PreviewWindowDelegate?
     
     // Monitor for Option key state
     private var isOptionPressed: Bool {
@@ -252,7 +254,7 @@ struct ContentView: View {
             existingWindow.close()
         }
         
-        let previewView = ImagePreviewWindowView(photo: photo, onClose: {
+        let previewView = ImagePreviewWindowView(viewModel: viewModel, onClose: {
             showImagePreview = false
         })
         let hostingController = NSHostingController(rootView: previewView)
@@ -270,7 +272,7 @@ struct ContentView: View {
         let windowDelegate = PreviewWindowDelegate(onClose: {
             showImagePreview = false
             self.previewWindow = nil // Clear reference on close
-        })
+        }, mainWindow: NSApp.mainWindow)
         window.delegate = windowDelegate
         
         window.makeKeyAndOrderFront(nil)
@@ -279,9 +281,6 @@ struct ContentView: View {
         previewWindow = window
         previewWindowDelegate = windowDelegate
     }
-    
-@State private var previewWindow: NSWindow?
-    @State private var previewWindowDelegate: PreviewWindowDelegate?
 }
 
 // MARK: - Subviews for ContentView
@@ -1036,32 +1035,44 @@ struct GroupBThumbnail: View {
 }
 
 struct ImagePreviewWindowView: View {
-    let photo: PhotoItem
+    @ObservedObject var viewModel: PhotoSorterViewModel
     let onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             // Zoomable image view
-            ZoomableAsyncImageView(url: photo.url)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            
-            // Bottom bar with filename and date
-            HStack(spacing: 8) {
-                Text(photo.filename)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            if let photo = viewModel.selectedPhoto {
+                ZoomableAsyncImageView(url: photo.url)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 
-                if let date = photo.creationDate {
-                    Text("(\(formatDate(date)))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                // Bottom bar with filename and date
+                HStack(spacing: 8) {
+                    Text(photo.filename)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    
+                    if let date = photo.creationDate {
+                        Text("(\(formatDate(date)))")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    
+                    Spacer()
                 }
-                
-                Spacer()
+                .padding(8)
+                .background(Material.bar)
+            } else {
+                VStack {
+                    Image(systemName: "photo")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("No photo selected")
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(8)
-            .background(Material.bar)
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
@@ -1117,26 +1128,26 @@ class PreviewWindowSizeManager {
 class PreviewWindowDelegate: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
     private var localMonitor: Any?
+    private weak var mainWindow: NSWindow?
     
-    init(onClose: @escaping () -> Void) {
+    init(onClose: @escaping () -> Void, mainWindow: NSWindow?) {
         self.onClose = onClose
+        self.mainWindow = mainWindow
         super.init()
     }
     
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
-        
-        // Set up local event monitor for Enter key
+        // Only monitor Enter/Return to close the preview window.
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
             guard let self = self, let window = window else { return event }
-            
-            // Check if this event is for our window
+
+            // Only handle events for this window
             if event.window == window {
-                // Check for Return key (keyCode 36 or 76)
                 if event.keyCode == 36 || event.keyCode == 76 {
                     self.onClose()
                     window.close()
-                    return nil // Consume the event
+                    return nil
                 }
             }
             return event

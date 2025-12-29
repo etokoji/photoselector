@@ -416,9 +416,11 @@ class PhotoSorterViewModel: ObservableObject {
     }
 
     private func selectSingle(_ id: UUID) {
-        primarySelectedPhotoID = id
-        selectedPhotoIDs = [id]
-        selectionAnchorPhotoID = id
+        DispatchQueue.main.async {
+            self.primarySelectedPhotoID = id
+            self.selectedPhotoIDs = [id]
+            self.selectionAnchorPhotoID = id
+        }
     }
 
     // MARK: - Keyboard navigation methods
