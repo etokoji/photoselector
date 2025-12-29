@@ -9,7 +9,7 @@ import SwiftUI
 import AppKit
 
 struct ContentView: View {
-    @StateObject private var viewModel = PhotoSorterViewModel()
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     @State private var showImagePreview = false
     @FocusState private var isGridFocused: Bool
     @State private var actualGridWidth: CGFloat = 800
@@ -92,18 +92,40 @@ struct ContentView: View {
                         photos: viewModel.photos,
                         columns: columns,
                         thumbnailSize: viewModel.thumbnailSize,
-                        selectedPhotoID: $viewModel.selectedPhotoID,
+                        primarySelectedPhotoID: $viewModel.primarySelectedPhotoID,
+                        selectedPhotoIDs: $viewModel.selectedPhotoIDs,
                         isGridFocused: _isGridFocused,
                         actualGridWidth: $actualGridWidth,
-                        onToggleStatus: { photo in
-                            viewModel.toggleStatus(for: photo)
+                        onSelect: { id, orderedIDs, isCommand, isShift in
+                            viewModel.applySelectionClick(
+                                id: id,
+                                orderedIDs: orderedIDs,
+                                isCommandPressed: isCommand,
+                                isShiftPressed: isShift
+                            )
+                        },
+                        onSetStatusForSelection: { status in
+                            viewModel.setStatusForSelection(status)
                         }
                     )
                     .frame(minWidth: 400),
                     right: RightSidePanel(
                         selectedPhoto: viewModel.selectedPhoto,
                         keepPhotos: viewModel.photos.filter { $0.status == .groupA },
-                        discardedPhotos: viewModel.photos.filter { $0.status == .groupB }
+                        discardedPhotos: viewModel.photos.filter { $0.status == .groupB },
+                        primarySelectedPhotoID: $viewModel.primarySelectedPhotoID,
+                        selectedPhotoIDs: $viewModel.selectedPhotoIDs,
+                        onSelect: { id, orderedIDs, isCommand, isShift in
+                            viewModel.applySelectionClick(
+                                id: id,
+                                orderedIDs: orderedIDs,
+                                isCommandPressed: isCommand,
+                                isShiftPressed: isShift
+                            )
+                        },
+                        onSetStatusForSelection: { status in
+                            viewModel.setStatusForSelection(status)
+                        }
                     )
                     .frame(minWidth: 200),
                     minLeft: 400,
@@ -155,11 +177,29 @@ struct ContentView: View {
                             PhotoGridItem(
                                 photo: photo,
                                 thumbnailSize: viewModel.thumbnailSize,
-                                isSelected: viewModel.selectedPhotoID == photo.id
+                                isSelected: viewModel.selectedPhotoIDs.contains(photo.id),
+                                isPrimary: viewModel.primarySelectedPhotoID == photo.id,
+                                onEnsureSelectedForContextMenu: {
+                                    if !viewModel.selectedPhotoIDs.contains(photo.id) {
+                                        viewModel.applySelectionClick(
+                                            id: photo.id,
+                                            orderedIDs: viewModel.photos.map { $0.id },
+                                            isCommandPressed: false,
+                                            isShiftPressed: false
+                                        )
+                                    }
+                                },
+                                onSetStatusForSelection: { status in
+                                    viewModel.setStatusForSelection(status)
+                                }
                             )
                             .onTapGesture {
-                                viewModel.selectedPhotoID = photo.id
-                                viewModel.toggleStatus(for: photo)
+                                viewModel.applySelectionClick(
+                                    id: photo.id,
+                                    orderedIDs: viewModel.photos.map { $0.id },
+                                    isCommandPressed: false,
+                                    isShiftPressed: false
+                                )
                             }
                         }
                     }
@@ -261,10 +301,12 @@ struct PhotoGridView: View {
     let photos: [PhotoItem]
     let columns: [GridItem]
     let thumbnailSize: Double
-    @Binding var selectedPhotoID: UUID?
+    @Binding var primarySelectedPhotoID: UUID?
+    @Binding var selectedPhotoIDs: Set<UUID>
     @FocusState var isGridFocused: Bool
     @Binding var actualGridWidth: CGFloat
-    let onToggleStatus: (PhotoItem) -> Void
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -275,12 +317,23 @@ struct PhotoGridView: View {
                             PhotoGridItem(
                                 photo: photo,
                                 thumbnailSize: thumbnailSize,
-                                isSelected: selectedPhotoID == photo.id
+                                isSelected: selectedPhotoIDs.contains(photo.id),
+                                isPrimary: primarySelectedPhotoID == photo.id,
+                                onEnsureSelectedForContextMenu: {
+                                    if !selectedPhotoIDs.contains(photo.id) {
+                                        onSelect(photo.id, photos.map { $0.id }, false, false)
+                                    }
+                                },
+                                onSetStatusForSelection: { status in
+                                    onSetStatusForSelection(status)
+                                }
                             )
                             .id(photo.id)
                             .onTapGesture {
-                                selectedPhotoID = photo.id
-                                onToggleStatus(photo)
+                                let flags = NSEvent.modifierFlags
+                                let isCommand = flags.contains(.command)
+                                let isShift = flags.contains(.shift)
+                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
                             }
                         }
                     }
@@ -292,7 +345,7 @@ struct PhotoGridView: View {
                 .onChange(of: geometry.size.width) { oldValue, newValue in
                     actualGridWidth = newValue
                 }
-                .onChange(of: selectedPhotoID) { oldValue, newValue in
+                .onChange(of: primarySelectedPhotoID) { oldValue, newValue in
                     if let newValue = newValue {
                         withAnimation {
                             proxy.scrollTo(newValue, anchor: .center)
@@ -314,6 +367,9 @@ struct PhotoGridItem: View {
     let photo: PhotoItem
     let thumbnailSize: Double
     var isSelected: Bool = false
+    var isPrimary: Bool = false
+    var onEnsureSelectedForContextMenu: (() -> Void)? = nil
+    var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
     
     var body: some View {
@@ -340,7 +396,7 @@ struct PhotoGridItem: View {
             .overlay(
                 // Selection highlight
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.blue, lineWidth: isSelected ? 3 : 0)
+                    .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 4 : 2) : 0)
                     .padding(-2)
             )
             
@@ -356,8 +412,27 @@ struct PhotoGridItem: View {
         }
         .opacity(photo.status == .groupB ? 0.5 : 1.0)
         .onAppear(perform: loadThumbnail)
+        .contextMenu {
+            Button("採用にする") {
+                handleContextMenuAction(.groupA)
+            }
+            Button("没にする") {
+                handleContextMenuAction(.groupB)
+            }
+            Divider()
+            Button("未分類に戻す") {
+                handleContextMenuAction(.unknown)
+            }
+        }
         .onChange(of: thumbnailSize) { oldValue, newValue in
             loadThumbnail()
+        }
+    }
+    
+    private func handleContextMenuAction(_ status: PhotoStatus) {
+        DispatchQueue.main.async {
+            onEnsureSelectedForContextMenu?()
+            onSetStatusForSelection?(status)
         }
     }
     
@@ -396,14 +471,30 @@ struct RightSidePanel: View {
     let selectedPhoto: PhotoItem?
     let keepPhotos: [PhotoItem]
     let discardedPhotos: [PhotoItem]
+    @Binding var primarySelectedPhotoID: UUID?
+    @Binding var selectedPhotoIDs: Set<UUID>
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     
     var body: some View {
 #if os(macOS)
         VerticalSplitViewRepresentable(
             top: SelectedPhotoPreview(photo: selectedPhoto),
             bottom: SplitViewRepresentable(
-                left: GroupASidePanel(photos: keepPhotos),
-                right: GroupBSidePanel(photos: discardedPhotos),
+                left: GroupASidePanel(
+                    photos: keepPhotos,
+                    primarySelectedPhotoID: $primarySelectedPhotoID,
+                    selectedPhotoIDs: $selectedPhotoIDs,
+                    onSelect: onSelect,
+                    onSetStatusForSelection: onSetStatusForSelection
+                ),
+                right: GroupBSidePanel(
+                    photos: discardedPhotos,
+                    primarySelectedPhotoID: $primarySelectedPhotoID,
+                    selectedPhotoIDs: $selectedPhotoIDs,
+                    onSelect: onSelect,
+                    onSetStatusForSelection: onSetStatusForSelection
+                ),
                 minLeft: 100,
                 minRight: 100,
                 splitPositionKey: "KeepDiscardSplitPosition"
@@ -422,8 +513,20 @@ struct RightSidePanel: View {
             
             // Bottom: Split Keep and Discard
             HSplitView {
-                GroupASidePanel(photos: keepPhotos)
-                GroupBSidePanel(photos: discardedPhotos)
+                GroupASidePanel(
+                    photos: keepPhotos,
+                    primarySelectedPhotoID: $primarySelectedPhotoID,
+                    selectedPhotoIDs: $selectedPhotoIDs,
+                    onSelect: onSelect,
+                    onSetStatusForSelection: onSetStatusForSelection
+                )
+                GroupBSidePanel(
+                    photos: discardedPhotos,
+                    primarySelectedPhotoID: $primarySelectedPhotoID,
+                    selectedPhotoIDs: $selectedPhotoIDs,
+                    onSelect: onSelect,
+                    onSetStatusForSelection: onSetStatusForSelection
+                )
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -518,6 +621,10 @@ struct SelectedPhotoPreview: View {
 
 struct GroupASidePanel: View {
     let photos: [PhotoItem]
+    @Binding var primarySelectedPhotoID: UUID?
+    @Binding var selectedPhotoIDs: Set<UUID>
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -561,7 +668,25 @@ struct GroupASidePanel: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 4) {
                         ForEach(photos) { photo in
-                            GroupAThumbnail(photo: photo)
+                            GroupAThumbnail(
+                                photo: photo,
+                                isSelected: selectedPhotoIDs.contains(photo.id),
+                                isPrimary: primarySelectedPhotoID == photo.id,
+                                onEnsureSelectedForContextMenu: {
+                                    if !selectedPhotoIDs.contains(photo.id) {
+                                        onSelect(photo.id, photos.map { $0.id }, false, false)
+                                    }
+                                },
+                                onSetStatusForSelection: { status in
+                                    onSetStatusForSelection(status)
+                                }
+                            )
+                            .onTapGesture {
+                                let flags = NSEvent.modifierFlags
+                                let isCommand = flags.contains(.command)
+                                let isShift = flags.contains(.shift)
+                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
+                            }
                         }
                     }
                     .padding(4)
@@ -574,6 +699,10 @@ struct GroupASidePanel: View {
 
 struct GroupAThumbnail: View {
     let photo: PhotoItem
+    var isSelected: Bool = false
+    var isPrimary: Bool = false
+    var onEnsureSelectedForContextMenu: (() -> Void)? = nil
+    var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
     
     var body: some View {
@@ -593,6 +722,11 @@ struct GroupAThumbnail: View {
             .frame(maxWidth: .infinity)
             .background(Color.gray.opacity(0.1))
             .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 3 : 2) : 0)
+                    .padding(-1)
+            )
             
             // Status Icon Overlay
             Image(systemName: "checkmark.circle.fill")
@@ -603,6 +737,25 @@ struct GroupAThumbnail: View {
                 .padding(2)
         }
         .onAppear(perform: loadThumbnail)
+        .contextMenu {
+            Button("採用にする") {
+                handleContextMenuAction(.groupA)
+            }
+            Button("没にする") {
+                handleContextMenuAction(.groupB)
+            }
+            Divider()
+            Button("未分類に戻す") {
+                handleContextMenuAction(.unknown)
+            }
+        }
+    }
+    
+    private func handleContextMenuAction(_ status: PhotoStatus) {
+        DispatchQueue.main.async {
+            onEnsureSelectedForContextMenu?()
+            onSetStatusForSelection?(status)
+        }
     }
     
     private func loadThumbnail() {
@@ -614,6 +767,10 @@ struct GroupAThumbnail: View {
 
 struct GroupBSidePanel: View {
     let photos: [PhotoItem]
+    @Binding var primarySelectedPhotoID: UUID?
+    @Binding var selectedPhotoIDs: Set<UUID>
+    let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool) -> Void
+    let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -657,7 +814,25 @@ struct GroupBSidePanel: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 4) {
                         ForEach(photos) { photo in
-                            GroupBThumbnail(photo: photo)
+                            GroupBThumbnail(
+                                photo: photo,
+                                isSelected: selectedPhotoIDs.contains(photo.id),
+                                isPrimary: primarySelectedPhotoID == photo.id,
+                                onEnsureSelectedForContextMenu: {
+                                    if !selectedPhotoIDs.contains(photo.id) {
+                                        onSelect(photo.id, photos.map { $0.id }, false, false)
+                                    }
+                                },
+                                onSetStatusForSelection: { status in
+                                    onSetStatusForSelection(status)
+                                }
+                            )
+                            .onTapGesture {
+                                let flags = NSEvent.modifierFlags
+                                let isCommand = flags.contains(.command)
+                                let isShift = flags.contains(.shift)
+                                onSelect(photo.id, photos.map { $0.id }, isCommand, isShift)
+                            }
                         }
                     }
                     .padding(4)
@@ -670,6 +845,10 @@ struct GroupBSidePanel: View {
 
 struct GroupBThumbnail: View {
     let photo: PhotoItem
+    var isSelected: Bool = false
+    var isPrimary: Bool = false
+    var onEnsureSelectedForContextMenu: (() -> Void)? = nil
+    var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
     
     var body: some View {
@@ -689,6 +868,11 @@ struct GroupBThumbnail: View {
             .frame(maxWidth: .infinity)
             .background(Color.gray.opacity(0.1))
             .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 3 : 2) : 0)
+                    .padding(-1)
+            )
             
             // Status Icon Overlay
             Image(systemName: "xmark.circle.fill")
@@ -699,6 +883,25 @@ struct GroupBThumbnail: View {
                 .padding(2)
         }
         .onAppear(perform: loadThumbnail)
+        .contextMenu {
+            Button("採用にする") {
+                handleContextMenuAction(.groupA)
+            }
+            Button("没にする") {
+                handleContextMenuAction(.groupB)
+            }
+            Divider()
+            Button("未分類に戻す") {
+                handleContextMenuAction(.unknown)
+            }
+        }
+    }
+    
+    private func handleContextMenuAction(_ status: PhotoStatus) {
+        DispatchQueue.main.async {
+            onEnsureSelectedForContextMenu?()
+            onSetStatusForSelection?(status)
+        }
     }
     
     private func loadThumbnail() {
@@ -832,6 +1035,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
 
 #Preview {
     ContentView()
+        .environmentObject(PhotoSorterViewModel())
 }
 
 // MARK: - Centering Clip View

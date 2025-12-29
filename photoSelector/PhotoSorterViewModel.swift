@@ -85,7 +85,12 @@ class PhotoSorterViewModel: ObservableObject {
             UserDefaults.standard.set(thumbnailSize, forKey: "ThumbnailSize")
         }
     }
-    @Published var selectedPhotoID: UUID? = nil // Currently selected photo for keyboard navigation
+    // Selection
+    // - primarySelectedPhotoID: the focused item used for preview + keyboard actions
+    // - selectedPhotoIDs: supports multi-selection via mouse (cmd/shift)
+    @Published var primarySelectedPhotoID: UUID? = nil
+    @Published var selectedPhotoIDs: Set<UUID> = []
+    private var selectionAnchorPhotoID: UUID? = nil
     
     // For Folder Tree
     @Published var folderTree: [FileSystemItem] = []
@@ -173,7 +178,15 @@ class PhotoSorterViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.photos = imageFiles.map { PhotoItem(url: $0) }
                 // Select first photo by default
-                self.selectedPhotoID = self.photos.first?.id
+                if let first = self.photos.first?.id {
+                    self.primarySelectedPhotoID = first
+                    self.selectedPhotoIDs = [first]
+                    self.selectionAnchorPhotoID = first
+                } else {
+                    self.primarySelectedPhotoID = nil
+                    self.selectedPhotoIDs = []
+                    self.selectionAnchorPhotoID = nil
+                }
             }
         } catch {
             self.errorMessage = "Failed to load photos: \(error.localizedDescription)"
@@ -200,6 +213,25 @@ class PhotoSorterViewModel: ObservableObject {
             photos[index].status = status
         }
     }
+
+    // MARK: - Bulk status actions (for context menu / menu bar)
+
+    var hasSelection: Bool {
+        !selectedPhotoIDs.isEmpty
+    }
+
+    var selectionCount: Int {
+        selectedPhotoIDs.count
+    }
+
+    func setStatusForSelection(_ status: PhotoStatus) {
+        guard !selectedPhotoIDs.isEmpty else { return }
+        for i in 0..<photos.count {
+            if selectedPhotoIDs.contains(photos[i].id) {
+                photos[i].status = status
+            }
+        }
+    }
     
     // Clear all selections (reset to unknown)
     func clearAllSelections() {
@@ -208,14 +240,73 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
     
-    // Keyboard navigation methods
+    // MARK: - Selection (mouse)
+
+    /// Apply selection based on a click in a specific pane order.
+    /// - Parameters:
+    ///   - id: clicked photo id
+    ///   - orderedIDs: the visual order of items in the pane where the click happened
+    ///   - isCommandPressed: toggles selection (multi-select)
+    ///   - isShiftPressed: selects a range from anchor to clicked id
+    func applySelectionClick(id: UUID, orderedIDs: [UUID], isCommandPressed: Bool, isShiftPressed: Bool) {
+        if isShiftPressed {
+            let anchor = selectionAnchorPhotoID ?? primarySelectedPhotoID ?? id
+            guard let a = orderedIDs.firstIndex(of: anchor),
+                  let b = orderedIDs.firstIndex(of: id)
+            else {
+                // Fallback: just select the clicked item
+                primarySelectedPhotoID = id
+                selectedPhotoIDs = [id]
+                selectionAnchorPhotoID = id
+                return
+            }
+
+            let range = a <= b ? a...b : b...a
+            selectedPhotoIDs = Set(orderedIDs[range])
+            primarySelectedPhotoID = id
+            // keep anchor as-is to allow repeated shift selections
+            return
+        }
+
+        if isCommandPressed {
+            if selectedPhotoIDs.contains(id) {
+                selectedPhotoIDs.remove(id)
+                if primarySelectedPhotoID == id {
+                    primarySelectedPhotoID = selectedPhotoIDs.first
+                }
+            } else {
+                selectedPhotoIDs.insert(id)
+                primarySelectedPhotoID = id
+            }
+            selectionAnchorPhotoID = primarySelectedPhotoID
+            return
+        }
+
+        // Normal click: single selection
+        primarySelectedPhotoID = id
+        selectedPhotoIDs = [id]
+        selectionAnchorPhotoID = id
+    }
+
+    /// Clear current selection (does not change photo statuses).
+    func clearSelection() {
+        primarySelectedPhotoID = nil
+        selectedPhotoIDs = []
+        selectionAnchorPhotoID = nil
+    }
+
+    // MARK: - Keyboard navigation methods
     func moveSelection(direction: NavigationDirection, columns: Int) {
         guard !photos.isEmpty else { return }
         
         // If no selection, select first photo
-        guard let currentID = selectedPhotoID,
+        guard let currentID = primarySelectedPhotoID,
               let currentIndex = photos.firstIndex(where: { $0.id == currentID }) else {
-            selectedPhotoID = photos.first?.id
+            if let first = photos.first?.id {
+                primarySelectedPhotoID = first
+                selectedPhotoIDs = [first]
+                selectionAnchorPhotoID = first
+            }
             return
         }
         
@@ -233,12 +324,15 @@ class PhotoSorterViewModel: ObservableObject {
         }
         
         if newIndex != currentIndex && newIndex >= 0 && newIndex < photos.count {
-            selectedPhotoID = photos[newIndex].id
+            let id = photos[newIndex].id
+            primarySelectedPhotoID = id
+            selectedPhotoIDs = [id]
+            selectionAnchorPhotoID = id
         }
     }
     
     func toggleSelectedPhotoStatus() {
-        guard let selectedID = selectedPhotoID,
+        guard let selectedID = primarySelectedPhotoID,
               let photo = photos.first(where: { $0.id == selectedID }) else {
             return
         }
@@ -246,7 +340,7 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     var selectedPhoto: PhotoItem? {
-        guard let selectedID = selectedPhotoID else { return nil }
+        guard let selectedID = primarySelectedPhotoID else { return nil }
         return photos.first(where: { $0.id == selectedID })
     }
     
