@@ -18,6 +18,8 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
         var splitPositionKey: String = ""
         private var saveTimer: Timer?
         private var lastUserResizeAt: Date?
+        private let tolerance: CGFloat = 1.0
+        private let maxRestoreAttempts = 5
 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             guard let splitView = notification.object as? NSSplitView else { return }
@@ -51,7 +53,7 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
                 // Check if frame is ready
                 if splitView.frame.width > savedPosition {
                     print("[\(splitPositionKey)] Restoring width: \(savedPosition) (Current Frame: \(splitView.frame.width))")
-                    splitView.setPosition(savedPosition, ofDividerAt: 0)
+                    applyDividerPosition(savedPosition, in: splitView)
                 } else {
                     print("[\(splitPositionKey)] Deferred restore. Saved: \(savedPosition) > Current Frame: \(splitView.frame.width)")
                     // Retry after delay
@@ -60,7 +62,7 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
                         // Re-check constraints
                         if splitView.frame.width > savedPosition {
                             print("[\(self.splitPositionKey)] Retry restoring: \(savedPosition) (Current Frame: \(splitView.frame.width))")
-                            splitView.setPosition(savedPosition, ofDividerAt: 0)
+                            self.applyDividerPosition(savedPosition, in: splitView)
                         } else {
                             print("[\(self.splitPositionKey)] Failed to restore. Saved: \(savedPosition) > Current Frame: \(splitView.frame.width)")
                         }
@@ -87,7 +89,27 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
             // Only save if window is visible and size is reasonable
             if position > 0 && splitView.window?.isVisible == true {
                 UserDefaults.standard.set(position, forKey: self.splitPositionKey)
-                print("[\(self.splitPositionKey)] Saved width: \(position)")
+                print("[\(self.splitPositionKey)] Divider move completed. Final width: \(position)")
+            }
+        }
+
+        private func applyDividerPosition(_ target: CGFloat, in splitView: NSSplitView, attempt: Int = 0) {
+            let clamped = max(0, min(splitView.frame.width, target))
+            splitView.setPosition(clamped, ofDividerAt: 0)
+            splitView.layoutSubtreeIfNeeded()
+
+            let actual = splitView.arrangedSubviews.first?.frame.width ?? 0
+            if abs(actual - clamped) <= tolerance {
+                print("[\(splitPositionKey)] Restore successful. Applied width: \(actual)")
+            } else if attempt < maxRestoreAttempts {
+                let delay = 0.2 * Double(attempt + 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self = self, let splitView = self.splitView else { return }
+                    print("[\(self.splitPositionKey)] Width \(actual) != target \(clamped). Retrying (\(attempt + 1))")
+                    self.applyDividerPosition(clamped, in: splitView, attempt: attempt + 1)
+                }
+            } else {
+                print("[\(splitPositionKey)] Restore failed after \(attempt) attempts. Final width: \(actual)")
             }
         }
     }
@@ -164,6 +186,8 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
         var splitPositionKey: String = ""
         private var saveTimer: Timer?
         private var lastUserResizeAt: Date?
+        private let tolerance: CGFloat = 1.0
+        private let maxRestoreAttempts = 5
 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             guard let splitView = notification.object as? NSSplitView else { return }
@@ -196,7 +220,7 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
                 // Check if frame is ready
                 if splitView.frame.height > savedPosition {
                     print("[\(splitPositionKey)] Restoring height: \(savedPosition) (Current Frame: \(splitView.frame.height))")
-                    splitView.setPosition(savedPosition, ofDividerAt: 0)
+                    applyDividerPosition(savedPosition, in: splitView)
                 } else {
                     print("[\(splitPositionKey)] Deferred restore. Saved: \(savedPosition) > Current Frame: \(splitView.frame.height)")
                     // Retry after delay
@@ -205,7 +229,7 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
                         // Re-check constraints
                         if splitView.frame.height > savedPosition {
                             print("[\(self.splitPositionKey)] Retry restoring: \(savedPosition) (Current Frame: \(splitView.frame.height))")
-                            splitView.setPosition(savedPosition, ofDividerAt: 0)
+                            self.applyDividerPosition(savedPosition, in: splitView)
                         } else {
                             print("[\(self.splitPositionKey)] Failed to restore. Saved: \(savedPosition) > Current Frame: \(splitView.frame.height)")
                         }
@@ -230,7 +254,27 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
             // Only save if window is visible and size is reasonable
             if position > 0 && splitView.window?.isVisible == true {
                 UserDefaults.standard.set(position, forKey: self.splitPositionKey)
-                print("[\(self.splitPositionKey)] Saved height: \(position)")
+                print("[\(self.splitPositionKey)] Divider move completed. Final height: \(position)")
+            }
+        }
+
+        private func applyDividerPosition(_ target: CGFloat, in splitView: NSSplitView, attempt: Int = 0) {
+            let clamped = max(0, min(splitView.frame.height, target))
+            splitView.setPosition(clamped, ofDividerAt: 0)
+            splitView.layoutSubtreeIfNeeded()
+
+            let actual = splitView.arrangedSubviews.first?.frame.height ?? 0
+            if abs(actual - clamped) <= tolerance {
+                print("[\(splitPositionKey)] Restore successful. Applied height: \(actual)")
+            } else if attempt < maxRestoreAttempts {
+                let delay = 0.2 * Double(attempt + 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self = self, let splitView = self.splitView else { return }
+                    print("[\(self.splitPositionKey)] Height \(actual) != target \(clamped). Retrying (\(attempt + 1))")
+                    self.applyDividerPosition(clamped, in: splitView, attempt: attempt + 1)
+                }
+            } else {
+                print("[\(splitPositionKey)] Restore failed after \(attempt) attempts. Final height: \(actual)")
             }
         }
     }
