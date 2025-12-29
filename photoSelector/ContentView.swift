@@ -102,12 +102,17 @@ struct ContentView: View {
                     .frame(minWidth: 400),
                     right: RightSidePanel(
                         selectedPhoto: viewModel.selectedPhoto,
+                        keepPhotos: viewModel.photos.filter { $0.status == .groupA },
                         discardedPhotos: viewModel.photos.filter { $0.status == .groupB }
                     )
-                    .frame(minWidth: 200)
+                    .frame(minWidth: 200),
+                    minLeft: 400,
+                    minRight: 200,
+                    splitPositionKey: "ContentSplitPosition"
                 ),
                 minLeft: 150,
-                minRight: 600
+                minRight: 600,
+                splitPositionKey: "MainSplitPosition"
             )
             .frame(minWidth: 800)
             .onKeyPress(.upArrow) {
@@ -389,15 +394,23 @@ struct PhotoGridItem: View {
 
 struct RightSidePanel: View {
     let selectedPhoto: PhotoItem?
+    let keepPhotos: [PhotoItem]
     let discardedPhotos: [PhotoItem]
     
     var body: some View {
 #if os(macOS)
         VerticalSplitViewRepresentable(
             top: SelectedPhotoPreview(photo: selectedPhoto),
-            bottom: GroupBSidePanel(photos: discardedPhotos),
-            minTop: 150,
-            minBottom: 150
+            bottom: SplitViewRepresentable(
+                left: GroupASidePanel(photos: keepPhotos),
+                right: GroupBSidePanel(photos: discardedPhotos),
+                minLeft: 100,
+                minRight: 100,
+                splitPositionKey: "KeepDiscardSplitPosition"
+            ),
+            minTop: 200,
+            minBottom: 200,
+            splitPositionKey: "RightPanelVerticalSplitPosition"
         )
 #else
         VStack(spacing: 0) {
@@ -407,8 +420,11 @@ struct RightSidePanel: View {
             
             Divider()
             
-            // Bottom: Discard List
-            GroupBSidePanel(photos: discardedPhotos)
+            // Bottom: Split Keep and Discard
+            HSplitView {
+                GroupASidePanel(photos: keepPhotos)
+                GroupBSidePanel(photos: discardedPhotos)
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
 #endif
@@ -500,8 +516,108 @@ struct SelectedPhotoPreview: View {
     }
 }
 
+struct GroupASidePanel: View {
+    let photos: [PhotoItem]
+    
+    let columns = [
+        GridItem(.adaptive(minimum: 80), spacing: 4)
+    ]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(.green)
+                Text("Keep Group (採用)")
+                    .font(.headline)
+                Spacer()
+                Text("\(photos.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.2), in: Capsule())
+            }
+            .padding()
+            .background(Material.bar)
+            
+            Divider()
+            
+            // Thumbnail Grid
+            if photos.isEmpty {
+                VStack {
+                    Spacer()
+                    Image(systemName: "photo.stack")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("No keep photos")
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 4) {
+                        ForEach(photos) { photo in
+                            GroupAThumbnail(photo: photo)
+                        }
+                    }
+                    .padding(4)
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+struct GroupAThumbnail: View {
+    let photo: PhotoItem
+    @State private var thumbnail: NSImage?
+    
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.2))
+                        .overlay(ProgressView())
+                }
+            }
+            .frame(height: 80)
+            .frame(maxWidth: .infinity)
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(4)
+            
+            // Status Icon Overlay
+            Image(systemName: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .padding(4)
+                .background(.ultraThinMaterial, in: Circle())
+                .padding(2)
+        }
+        .onAppear(perform: loadThumbnail)
+    }
+    
+    private func loadThumbnail() {
+        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: 160) { image in
+            self.thumbnail = image
+        }
+    }
+}
+
 struct GroupBSidePanel: View {
     let photos: [PhotoItem]
+    
+    let columns = [
+        GridItem(.adaptive(minimum: 80), spacing: 4)
+    ]
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -524,7 +640,7 @@ struct GroupBSidePanel: View {
             
             Divider()
             
-            // Thumbnail List
+            // Thumbnail Grid
             if photos.isEmpty {
                 VStack {
                     Spacer()
@@ -539,12 +655,12 @@ struct GroupBSidePanel: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 8) {
+                    LazyVGrid(columns: columns, spacing: 4) {
                         ForEach(photos) { photo in
                             GroupBThumbnail(photo: photo)
                         }
                     }
-                    .padding()
+                    .padding(4)
                 }
             }
         }
@@ -554,46 +670,41 @@ struct GroupBSidePanel: View {
 
 struct GroupBThumbnail: View {
     let photo: PhotoItem
+    @State private var thumbnail: NSImage?
     
     var body: some View {
-        HStack(spacing: 8) {
-            AsyncImage(url: photo.url) { phase in
-                switch phase {
-                case .empty:
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let thumbnail = thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
                     Rectangle()
                         .fill(Color.gray.opacity(0.2))
                         .overlay(ProgressView())
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .failure:
-                    Rectangle()
-                        .fill(Color.red.opacity(0.2))
-                        .overlay(Image(systemName: "exclamationmark.triangle"))
-                @unknown default:
-                    EmptyView()
                 }
             }
-            .frame(width: 60, height: 60)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .frame(height: 80)
+            .frame(maxWidth: .infinity)
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(4)
             
-            VStack(alignment: .leading, spacing: 2) {
-                Text(photo.filename)
-                    .font(.caption)
-                    .lineLimit(2)
-                    .foregroundStyle(.primary)
-                
-                Image(systemName: "xmark.circle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
-            
-            Spacer()
+            // Status Icon Overlay
+            Image(systemName: "xmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .padding(4)
+                .background(.ultraThinMaterial, in: Circle())
+                .padding(2)
         }
-        .padding(8)
-        .background(Color(nsColor: .textBackgroundColor))
-        .cornerRadius(8)
+        .onAppear(perform: loadThumbnail)
+    }
+    
+    private func loadThumbnail() {
+        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: 160) { image in
+            self.thumbnail = image
+        }
     }
 }
 
