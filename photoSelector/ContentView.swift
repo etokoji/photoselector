@@ -29,10 +29,16 @@ struct ContentView: View {
     
     // Calculate actual number of columns in the grid based on real width
     var actualColumns: Int {
-        let itemWidth = viewModel.thumbnailSize + 10 // thumbnailSize + spacing
-        let padding: CGFloat = 32 // Total horizontal padding (16 on each side)
+        let spacing: CGFloat = 10 // spacing configured on GridItem
+        let itemWidth = CGFloat(viewModel.thumbnailSize)
+        let padding: CGFloat = 32 // Total horizontal padding (16 on each side) from .padding()
         let availableWidth = actualGridWidth - padding
-        return max(1, Int(availableWidth / itemWidth))
+
+        // Total width consumed by N items: N*itemWidth + (N-1)*spacing
+        // Solve for N: N = floor((availableWidth + spacing) / (itemWidth + spacing))
+        let raw = (availableWidth + spacing) / (itemWidth + spacing)
+        let count = max(1, Int(floor(raw)))
+        return count
     }
     
     var body: some View {
