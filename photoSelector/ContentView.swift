@@ -428,6 +428,9 @@ struct PhotoGridItem: View {
         }
         .opacity(photo.status == .groupB ? 0.5 : 1.0)
         .onAppear(perform: loadThumbnail)
+        .overlay(RightClickCaptureView {
+            onEnsureSelectedForContextMenu?()
+        })
         .contextMenu {
             Button("採用にする") {
                 handleContextMenuAction(.groupA)
@@ -977,6 +980,9 @@ struct GroupBThumbnail: View {
                 .padding(2)
         }
         .onAppear(perform: loadThumbnail)
+        .overlay(RightClickCaptureView {
+            onEnsureSelectedForContextMenu?()
+        })
         .contextMenu {
             Button("採用にする") {
                 handleContextMenuAction(.groupA)
@@ -1150,6 +1156,33 @@ class CenteringClipView: NSClipView {
     }
 }
 
+// Capture right mouse down events to ensure selection before context menu shows
+struct RightClickCaptureView: NSViewRepresentable {
+    let onRightClick: () -> Void
+
+    func makeNSView(context: Context) -> RightClickCaptureNSView {
+        let view = RightClickCaptureNSView()
+        view.onRightClick = onRightClick
+        return view
+    }
+
+    func updateNSView(_ nsView: RightClickCaptureNSView, context: Context) {
+        nsView.onRightClick = onRightClick
+    }
+
+    class RightClickCaptureNSView: NSView {
+        var onRightClick: (() -> Void)?
+
+        override func rightMouseDown(with event: NSEvent) {
+            onRightClick?()
+            super.rightMouseDown(with: event)
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+    }
+}
 // MARK: - Zoomable Image View (NSViewRepresentable)
 
 struct ZoomableAsyncImageView: NSViewRepresentable {
