@@ -488,40 +488,59 @@ class PhotoSorterViewModel: ObservableObject {
         
         isProcessing = true
         let fileManager = FileManager.default
-        let discardFolderURL = currentFolder.appendingPathComponent("没")
         
-        // Create "没" folder if it doesn't exist
-        if !fileManager.fileExists(atPath: discardFolderURL.path) {
+        // Target folder: sibling of currentFolder, named "<currentFolderName>_没"
+        let parentFolder = currentFolder.deletingLastPathComponent()
+        let siblingFolderName = currentFolder.lastPathComponent + "_没"
+        var discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
+        
+        // Ensure destination exists. If we fail (sandbox, perms), fallback to subfolder "没" inside currentFolder
+        func ensureDestination() -> URL? {
+            if fileManager.fileExists(atPath: discardFolderURL.path) {
+                return discardFolderURL
+            }
             do {
                 try fileManager.createDirectory(at: discardFolderURL, withIntermediateDirectories: true, attributes: nil)
+                return discardFolderURL
             } catch {
-                self.errorMessage = "Failed to create discard folder: \(error.localizedDescription)"
-                self.showError = true
-                self.isProcessing = false
-                return
+                // Fallback
+                let fallback = currentFolder.appendingPathComponent("没")
+                do {
+                    if !fileManager.fileExists(atPath: fallback.path) {
+                        try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true, attributes: nil)
+                    }
+                    DispatchQueue.main.async {
+                        print("[Move] Could not create sibling discard folder (\(discardFolderURL.path)). Falling back to \(fallback.path). Error: \(error.localizedDescription)")
+                    }
+                    return fallback
+                } catch {
+                    DispatchQueue.main.async {
+                        self.errorMessage = "Failed to create discard folder: \(error.localizedDescription)"
+                        self.showError = true
+                        self.isProcessing = false
+                    }
+                    return nil
+                }
             }
         }
         
+        guard let destinationRoot = ensureDestination() else { return }
+        
         let itemsToMove = photos.filter { $0.status == .groupB }
-        var movedCount = 0
         
         DispatchQueue.global(qos: .userInitiated).async {
             for item in itemsToMove {
-                let destinationURL = discardFolderURL.appendingPathComponent(item.url.lastPathComponent)
+                let destinationURL = destinationRoot.appendingPathComponent(item.url.lastPathComponent)
                 do {
                     try fileManager.moveItem(at: item.url, to: destinationURL)
-                    movedCount += 1
                     
-                    // Update the item in the list to reflect it's gone or moved
-                    // For now, we might want to remove it from the list or mark it as moved.
-                    // Let's remove it from the list to show progress.
                     DispatchQueue.main.async {
                         if let index = self.photos.firstIndex(where: { $0.id == item.id }) {
                             self.photos.remove(at: index)
                         }
                     }
                 } catch {
-                    print("Failed to move \(item.filename): \(error.localizedDescription)")
+                    print("[Move] Failed to move \(item.filename): \(error.localizedDescription)")
                 }
             }
             
