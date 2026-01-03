@@ -22,69 +22,65 @@ photoSelector is a macOS application for efficiently organizing and classifying 
 
 Photos can be classified into three states:
 
-- **Unclassified** (no border): Photos that have not yet been classified.
-- **Keep** (green border): Photos you want to save.
-- **Discard** (red border): Photos you want to delete.
+- **Unclassified** (no border)
+- **Keep** (green border)
+- **Discard** (red border)
 
 #### How to Classify
 
-**Using the mouse:**
-- Click on a photo to cycle through its states:
-  - Unclassified → Keep → Discard → Unclassified ...
+- Mouse click now performs selection (it no longer cycles the state).
+- Right-click opens a context menu with actions: "Mark as Keep", "Mark as Discard", "Reset to Unclassified".
+- When right-clicking on an unselected cell, that cell is selected first and then the menu opens.
+- Multi-select is supported:
+  - ⌘-Click: add/remove a single item to the selection
+  - ⇧-Click: select a range in the current pane
 
 **Using the keyboard:**
-- Use the arrow keys to select a photo.
-- Press the Space key to toggle its state.
+- Use the arrow keys to move selection (within the currently active pane).
+- Press Space to toggle the primary selection's state (Unclassified → Keep → Discard → Unclassified).
 
 ### 3. Move Discarded Photos
 
 1. Click the "Move Discarded (没)" button in the upper right corner.
-2. Photos classified as "Discard" will be moved to a "没" subfolder.
-3. Moved photos will be removed from the list.
+2. Discarded photos are moved to a sibling folder named "<current-folder-name>_没" next to the currently selected folder.
+   - If the sibling folder cannot be created due to permissions/sandbox, the app falls back to creating a "没" subfolder inside the current folder.
+3. Moved photos are removed from the lists in real time.
 
 ## Screen Layout
 
-### Left Side: Photo Grid
+The main window uses a 3-pane layout:
 
-- Displays photos in a grid format.
-- The selected photo is highlighted with a blue border.
-- Green border: Kept photos.
-- Red border: Discarded photos.
+- Left: Folder tree (select a folder to load photos)
+- Center: Photo grid (unified view of the current folder)
+- Right: A split panel with Preview (top) and "Keep" / "Discard" lists (bottom, horizontally split)
 
-### Upper Right: Preview
+Additional behavior:
+- The currently active pane is lightly highlighted. Keyboard navigation (arrow keys) and Cmd+A operate on the active pane.
+- All grids (center, Keep, Discard) auto-scroll to keep the selected item visible.
 
-- Displays a larger view of the currently selected photo.
-- The filename is also shown.
-
-### Lower Right: Discard List
-
-- A list of photos classified as "Discard".
-- You can review them before moving.
-
-### Toolbar
+### Toolbar & Menu
 
 - **Open Folder**: Opens a folder.
 - **Thumbnail Size Slider**: Changes the display size of photos (100–400px).
 - **Clear**: Resets all classifications.
 - **Photo Count**: Shows the number of currently loaded photos.
-- **Move Discarded**: Moves discarded photos to the "没" folder.
+- **Move Discarded**: Moves discarded photos (see destination policy above).
+- Menu bar "仕分け" provides the same Keep / Discard / Reset actions and "Select All" (⌘A) that operate on the active pane.
 
 ## Keyboard Shortcuts
 
-### Photo Selection
+### Selection & Navigation (active pane)
 
 | Key | Action |
 |------|------|
-| ↑ | Select the photo above |
-| ↓ | Select the photo below |
-| ← | Select the photo to the left |
-| → | Select the photo to the right |
+| ↑ / ↓ / ← / → | Move selection within the active pane |
+| ⌘A | Select all items in the active pane |
 
 ### Photo Actions
 
 | Key | Action |
 |------|------|
-| Space | Toggle the state of the selected photo (Unclassified→Keep→Discard) |
+| Space | Toggle the primary selection's state (Unclassified→Keep→Discard) |
 | Enter | Open the selected photo in a magnified view |
 
 ### Magnified View Actions
@@ -146,8 +142,7 @@ All three dividers in the app can be adjusted by dragging:
 
 The following settings are automatically saved and restored on the next launch:
 
-- Horizontal divider position
-- Vertical divider position (right panel)
+- All split view divider positions (main left/right, right panel top/bottom, keep/discard split)
 - Thumbnail size (slider position)
 - Magnified view window size
 
