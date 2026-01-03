@@ -137,7 +137,8 @@ struct ContentView: View {
                         onSetStatusForSelection: { status in
                             viewModel.setStatusForSelection(status)
                         },
-                        activeContext: viewModel.selectionContext
+                        activeContext: viewModel.selectionContext,
+                        onOpenPreview: { showImagePreview = true }
                     )
                     .frame(minWidth: 200),
                     minLeft: 400,
@@ -500,11 +501,12 @@ struct RightSidePanel: View {
     let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var activeContext: SelectionContext = .grid
+    let onOpenPreview: () -> Void
     
     var body: some View {
 #if os(macOS)
         VerticalSplitViewRepresentable(
-            top: SelectedPhotoPreview(photo: selectedPhoto),
+            top: SelectedPhotoPreview(photo: selectedPhoto, onOpenPreview: onOpenPreview),
             bottom: SplitViewRepresentable(
                 left: GroupASidePanel(
                     photos: keepPhotos,
@@ -533,7 +535,7 @@ struct RightSidePanel: View {
 #else
         VStack(spacing: 0) {
             // Top: Selected Photo Preview
-            SelectedPhotoPreview(photo: selectedPhoto)
+            SelectedPhotoPreview(photo: selectedPhoto, onOpenPreview: onOpenPreview)
                 .frame(minHeight: 200, idealHeight: 400)
             
             Divider()
@@ -563,6 +565,7 @@ struct RightSidePanel: View {
 
 struct SelectedPhotoPreview: View {
     let photo: PhotoItem?
+    var onOpenPreview: (() -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -607,9 +610,13 @@ struct SelectedPhotoPreview: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        onOpenPreview?()
+                    }
                 }
                 
-                // Filename, date, and status at bottom
+                // Filename and date at bottom
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
                     HStack(spacing: 8) {
