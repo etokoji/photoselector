@@ -187,8 +187,16 @@ class PhotoSorterViewModel: ObservableObject {
                 imageExtensions.contains(url.pathExtension.lowercased())
             }
             
+            // Construct photo items and sort by creation date ascending
+            let items = imageFiles.map { PhotoItem(url: $0) }
+                .sorted { a, b in
+                    let da = a.creationDate ?? Date.distantFuture
+                    let db = b.creationDate ?? Date.distantFuture
+                    return da < db
+                }
+            
             DispatchQueue.main.async {
-                self.photos = imageFiles.map { PhotoItem(url: $0) }
+                self.photos = items
                 // Select first photo by default
                 if let first = self.photos.first?.id {
                     self.primarySelectedPhotoID = first
