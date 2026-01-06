@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var actualGridWidth: CGFloat = 800
     @State private var previewWindow: NSWindow?
     @State private var previewWindowDelegate: PreviewWindowDelegate?
+    // Bridge state to avoid publishing during view updates
+    @State private var localSortMode: DateSortMode = .fileCreation
     
     // Monitor for Option key state
     private var isOptionPressed: Bool {
@@ -78,8 +80,8 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                // Sort mode picker
-                Picker("Date", selection: $viewModel.sortMode) {
+                // Sort mode picker (local state bridged to ViewModel)
+                Picker("Date", selection: $localSortMode) {
                     Text("File").tag(DateSortMode.fileCreation)
                     Text("EXIF").tag(DateSortMode.exifPreferred)
                 }
@@ -172,7 +174,23 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: viewModel.sortMode) { _, _ in
+.onAppear {
+                // Initialize bridge state
+                localSortMode = viewModel.sortMode
+            }
+            .onChange(of: localSortMode) { _, newValue in
+                // Propagate user changes to ViewModel on next runloop and only if changed
+                if viewModel.sortMode != newValue {
+                    DispatchQueue.main.async {
+                        viewModel.sortMode = newValue
+                    }
+                }
+            }
+            .onChange(of: viewModel.sortMode) { _, newValue in
+                // Keep local in sync (no publish from this assignment)
+                if localSortMode != newValue {
+                    localSortMode = newValue
+                }
                 // Defer resort to avoid publishing during Picker update cycle
                 DispatchQueue.main.async {
                     viewModel.resortPhotos()
