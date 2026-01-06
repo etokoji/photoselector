@@ -355,30 +355,25 @@ class PhotoSorterViewModel: ObservableObject {
                              isShiftPressed: Bool,
                              context: SelectionContext) {
         if isShiftPressed {
-            // Set context and selection changes together, deferred
-            DispatchQueue.main.async {
-                self.selectionContext = context
-            }
             let anchor = selectionAnchorPhotoID ?? primarySelectedPhotoID ?? id
             guard let a = orderedIDs.firstIndex(of: anchor),
-                  let b = orderedIDs.firstIndex(of: id)
-            else {
-                // Fallback: just select the clicked item
+                  let b = orderedIDs.firstIndex(of: id) else {
+                // Fallback: just select the clicked item (deferred)
                 selectSingle(id, deferred: true)
                 return
             }
-
             let range = a <= b ? a...b : b...a
-            DispatchQueue.main.async {
+            // Combine publishes and delay slightly beyond current update cycle
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) {
+                self.selectionContext = context
                 self.selectedPhotoIDs = Set(orderedIDs[range])
                 self.primarySelectedPhotoID = id
                 self.selectionAnchorPhotoID = anchor
             }
             return
         }
-
         if isCommandPressed {
-            DispatchQueue.main.async {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) {
                 self.selectionContext = context
                 if self.selectedPhotoIDs.contains(id) {
                     self.selectedPhotoIDs.remove(id)
@@ -394,11 +389,11 @@ class PhotoSorterViewModel: ObservableObject {
             return
         }
 
-        // Normal click: single selection
-        DispatchQueue.main.async {
+        // Normal click: single selection — group into one deferred block
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1)) {
             self.selectionContext = context
+            self.selectSingle(id, deferred: false)
         }
-        selectSingle(id, deferred: true)
     }
 
     /// Clear current selection (does not change photo statuses).
@@ -450,7 +445,8 @@ class PhotoSorterViewModel: ObservableObject {
             self.selectionAnchorPhotoID = id
         }
         if deferred {
-            DispatchQueue.main.async(execute: apply)
+            // Ensure we are safely past the current update cycle
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1), execute: apply)
         } else {
             apply()
         }
@@ -466,8 +462,8 @@ class PhotoSorterViewModel: ObservableObject {
         
         let currentID = primarySelectedPhotoID ?? contextIDs.first!
         guard let currentIndex = contextIDs.firstIndex(of: currentID) else {
-            // Should be in the list, but if not found, select first
-            selectSingle(contextIDs.first!)
+            // Should be in the list, but if not found, select first (deferred to avoid view-update publish)
+            selectSingle(contextIDs.first!, deferred: true)
             return
         }
         
@@ -498,7 +494,8 @@ class PhotoSorterViewModel: ObservableObject {
         }
         
         if newIndex != currentIndex && newIndex >= 0 && newIndex < contextIDs.count {
-            selectSingle(contextIDs[newIndex])
+            // Defer selection change to avoid publishing during SwiftUI's key handling update cycle
+            selectSingle(contextIDs[newIndex], deferred: true)
         }
     }
     
