@@ -156,7 +156,9 @@ struct ContentView: View {
             }
             .onChange(of: viewModel.selectedFolderURL) { oldValue, newValue in
                 if let url = newValue {
-                    viewModel.loadPhotos(from: url)
+                    DispatchQueue.main.async {
+                        viewModel.loadPhotos(from: url)
+                    }
                 }
             }
             .onKeyPress(.downArrow) {
@@ -295,9 +297,10 @@ struct ContentView: View {
 struct FolderTreeView: View {
     let folderTree: [FileSystemItem]
     @Binding var selectedFolderURL: URL?
+    @State private var localSelection: URL?
 
     var body: some View {
-        List(folderTree, children: \.children, selection: $selectedFolderURL) { item in
+        List(folderTree, children: \.children, selection: $localSelection) { item in
             HStack {
                 Image(systemName: item.isFolder ? "folder" : "photo")
                 Text(item.name)
@@ -305,6 +308,24 @@ struct FolderTreeView: View {
             .padding(.vertical, 2)
         }
         .listStyle(SidebarListStyle())
+        // Keep local state and view model in sync without publishing during a view update
+        .onAppear {
+            // Initialize local selection from model
+            localSelection = selectedFolderURL
+        }
+        .onChange(of: localSelection) { _, newValue in
+            // Propagate user-driven selection changes to the view model on the next runloop
+            guard selectedFolderURL != newValue else { return }
+            DispatchQueue.main.async {
+                selectedFolderURL = newValue
+            }
+        }
+        .onChange(of: selectedFolderURL) { _, newValue in
+            // Reflect programmatic changes into the local selection synchronously (no publish involved)
+            if localSelection != newValue {
+                localSelection = newValue
+            }
+        }
     }
 }
 
@@ -767,15 +788,17 @@ struct GroupASidePanel: View {
                                 }
                             }
                         }
-                        .onAppear {
-                            let itemWidth: CGFloat = 84
-                            let padding: CGFloat = 8
-                            let availableWidth = geometry.size.width - padding
-                            let count = max(1, Int(availableWidth / itemWidth))
+                    .onAppear {
+                        let itemWidth: CGFloat = 84
+                        let padding: CGFloat = 8
+                        let availableWidth = geometry.size.width - padding
+                        let count = max(1, Int(availableWidth / itemWidth))
+                        DispatchQueue.main.async {
                             if viewModel.groupAColumns != count {
                                 viewModel.groupAColumns = count
                             }
                         }
+                    }
                         .onChange(of: primarySelectedPhotoID) { _, newValue in
                             if let newValue = newValue, isContextActive {
                                 withAnimation {
@@ -950,15 +973,17 @@ struct GroupBSidePanel: View {
                                 }
                             }
                         }
-                        .onAppear {
-                            let itemWidth: CGFloat = 84
-                            let padding: CGFloat = 8
-                            let availableWidth = geometry.size.width - padding
-                            let count = max(1, Int(availableWidth / itemWidth))
+                    .onAppear {
+                        let itemWidth: CGFloat = 84
+                        let padding: CGFloat = 8
+                        let availableWidth = geometry.size.width - padding
+                        let count = max(1, Int(availableWidth / itemWidth))
+                        DispatchQueue.main.async {
                             if viewModel.groupBColumns != count {
                                 viewModel.groupBColumns = count
                             }
                         }
+                    }
                         .onChange(of: primarySelectedPhotoID) { _, newValue in
                             if let newValue = newValue, isContextActive {
                                 withAnimation {

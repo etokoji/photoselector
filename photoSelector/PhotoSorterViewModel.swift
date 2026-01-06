@@ -142,9 +142,11 @@ class PhotoSorterViewModel: ObservableObject {
             FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)
         ]
         
-        // Initially select the root folder
+        // Initially select the root folder (defer to avoid publishing during folderTree view updates)
         if selectedFolderURL == nil {
-            self.selectedFolderURL = rootURL
+            DispatchQueue.main.async {
+                self.selectedFolderURL = rootURL
+            }
         }
     }
     
@@ -197,17 +199,17 @@ class PhotoSorterViewModel: ObservableObject {
             
             DispatchQueue.main.async {
                 self.photos = items
-                // Select first photo by default
+                // Defer selection and context to the next runloop tick to avoid publishing during initial view updates
                 if let first = self.photos.first?.id {
-                    self.primarySelectedPhotoID = first
-                    self.selectedPhotoIDs = [first]
-                    self.selectionAnchorPhotoID = first
-                    self.selectionContext = .grid
+                    DispatchQueue.main.async {
+                        self.selectSingle(first, deferred: false)
+                        self.selectionContext = .grid
+                    }
                 } else {
-                    self.primarySelectedPhotoID = nil
-                    self.selectedPhotoIDs = []
-                    self.selectionAnchorPhotoID = nil
-                    self.selectionContext = .grid
+                    self.clearSelection(deferred: true)
+                    DispatchQueue.main.async {
+                        self.selectionContext = .grid
+                    }
                 }
             }
         } catch {
@@ -327,7 +329,7 @@ class PhotoSorterViewModel: ObservableObject {
             if let nextID = nextSelectionID {
                 selectSingle(nextID)
             } else {
-                clearSelection()
+                clearSelection(deferred: false)
             }
         }
     }
@@ -352,47 +354,65 @@ class PhotoSorterViewModel: ObservableObject {
                              isCommandPressed: Bool,
                              isShiftPressed: Bool,
                              context: SelectionContext) {
-        selectionContext = context
         if isShiftPressed {
+            // Set context and selection changes together, deferred
+            DispatchQueue.main.async {
+                self.selectionContext = context
+            }
             let anchor = selectionAnchorPhotoID ?? primarySelectedPhotoID ?? id
             guard let a = orderedIDs.firstIndex(of: anchor),
                   let b = orderedIDs.firstIndex(of: id)
             else {
                 // Fallback: just select the clicked item
-                selectSingle(id)
+                selectSingle(id, deferred: true)
                 return
             }
 
             let range = a <= b ? a...b : b...a
-            selectedPhotoIDs = Set(orderedIDs[range])
-            primarySelectedPhotoID = id
-            selectionAnchorPhotoID = anchor
+            DispatchQueue.main.async {
+                self.selectedPhotoIDs = Set(orderedIDs[range])
+                self.primarySelectedPhotoID = id
+                self.selectionAnchorPhotoID = anchor
+            }
             return
         }
 
         if isCommandPressed {
-            if selectedPhotoIDs.contains(id) {
-                selectedPhotoIDs.remove(id)
-                if primarySelectedPhotoID == id {
-                    primarySelectedPhotoID = selectedPhotoIDs.first
+            DispatchQueue.main.async {
+                self.selectionContext = context
+                if self.selectedPhotoIDs.contains(id) {
+                    self.selectedPhotoIDs.remove(id)
+                    if self.primarySelectedPhotoID == id {
+                        self.primarySelectedPhotoID = self.selectedPhotoIDs.first
+                    }
+                } else {
+                    self.selectedPhotoIDs.insert(id)
+                    self.primarySelectedPhotoID = id
                 }
-            } else {
-                selectedPhotoIDs.insert(id)
-                primarySelectedPhotoID = id
+                self.selectionAnchorPhotoID = self.primarySelectedPhotoID
             }
-            selectionAnchorPhotoID = primarySelectedPhotoID
             return
         }
 
         // Normal click: single selection
-        selectSingle(id)
+        DispatchQueue.main.async {
+            self.selectionContext = context
+        }
+        selectSingle(id, deferred: true)
     }
 
     /// Clear current selection (does not change photo statuses).
-    func clearSelection() {
-        primarySelectedPhotoID = nil
-        selectedPhotoIDs = []
-        selectionAnchorPhotoID = nil
+    func clearSelection(deferred: Bool = false) {
+        let apply = {
+            self.primarySelectedPhotoID = nil
+            self.selectedPhotoIDs = []
+            self.selectionAnchorPhotoID = nil
+        }
+        if deferred {
+            DispatchQueue.main.async(execute: apply)
+        } else {
+            apply()
+        }
     }
 
     func selectAll(in context: SelectionContext) {
@@ -423,11 +443,16 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
 
-    private func selectSingle(_ id: UUID) {
-        DispatchQueue.main.async {
+    private func selectSingle(_ id: UUID, deferred: Bool = false) {
+        let apply = {
             self.primarySelectedPhotoID = id
             self.selectedPhotoIDs = [id]
             self.selectionAnchorPhotoID = id
+        }
+        if deferred {
+            DispatchQueue.main.async(execute: apply)
+        } else {
+            apply()
         }
     }
 
