@@ -81,8 +81,25 @@ enum SelectionContext {
     case discard
 }
 
+enum DateSortMode: String, CaseIterable, Identifiable {
+    case fileCreation = "file"
+    case exifPreferred = "exif"
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .fileCreation: return "File"
+        case .exifPreferred: return "EXIF"
+        }
+    }
+}
+
 class PhotoSorterViewModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
+    @Published var sortMode: DateSortMode {
+        didSet {
+            UserDefaults.standard.set(sortMode.rawValue, forKey: "DateSortMode")
+        }
+    }
     @Published var currentFolder: URL?
     @Published var isProcessing: Bool = false
     @Published var errorMessage: String?
@@ -112,6 +129,11 @@ class PhotoSorterViewModel: ObservableObject {
         // Restore saved thumbnail size or use default
         let savedSize = UserDefaults.standard.double(forKey: "ThumbnailSize")
         self.thumbnailSize = savedSize > 0 ? savedSize : 150
+        if let raw = UserDefaults.standard.string(forKey: "DateSortMode"), let m = DateSortMode(rawValue: raw) {
+            self.sortMode = m
+        } else {
+            self.sortMode = .fileCreation // default: EXIFなし
+        }
     }
     
     // Scan the root folder and build the folder tree
@@ -181,7 +203,7 @@ class PhotoSorterViewModel: ObservableObject {
         let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
         
         do {
-            let fileURLs = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil, options: options)
+            let fileURLs = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: [.creationDateKey], options: options)
             
             let imageExtensions = ["jpg", "jpeg", "png", "heic", "gif", "tiff"]
             
@@ -189,13 +211,38 @@ class PhotoSorterViewModel: ObservableObject {
                 imageExtensions.contains(url.pathExtension.lowercased())
             }
             
-            // Construct photo items and sort by creation date ascending
-            let items = imageFiles.map { PhotoItem(url: $0) }
-                .sorted { a, b in
-                    let da = a.creationDate ?? Date.distantFuture
-                    let db = b.creationDate ?? Date.distantFuture
+            // Sort URLs first to avoid EXIF unless requested
+            let sortedURLs: [URL]
+            switch sortMode {
+            case .fileCreation:
+                sortedURLs = imageFiles.sorted { a, b in
+                    let da = (try? a.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture
+                    let db = (try? b.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture
                     return da < db
                 }
+            case .exifPreferred:
+                sortedURLs = imageFiles.sorted { a, b in
+                    // Slow path: check EXIF first, fallback to file creation
+                    func exifDate(_ url: URL) -> Date? {
+                        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+                        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
+                           let s = exif[kCGImagePropertyExifDateTimeOriginal] as? String {
+                            let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; if let d = f.date(from: s) { return d }
+                        }
+                        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+                           let s = tiff[kCGImagePropertyTIFFDateTime] as? String {
+                            let f = DateFormatter(); f.dateFormat = "yyyy:MM:dd HH:mm:ss"; if let d = f.date(from: s) { return d }
+                        }
+                        return nil
+                    }
+                    let da = exifDate(a) ?? ((try? a.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture)
+                    let db = exifDate(b) ?? ((try? b.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture)
+                    return da < db
+                }
+            }
+            
+            let items = sortedURLs.map { PhotoItem(url: $0) }
             
             DispatchQueue.main.async {
                 self.photos = items
@@ -510,6 +557,36 @@ class PhotoSorterViewModel: ObservableObject {
     var selectedPhoto: PhotoItem? {
         guard let selectedID = primarySelectedPhotoID else { return nil }
         return photos.first(where: { $0.id == selectedID })
+    }
+    
+    // Date for UI display based on setting
+    func displayedDate(for photo: PhotoItem) -> Date? {
+        switch sortMode {
+        case .fileCreation:
+            return photo.fileCreationDate
+        case .exifPreferred:
+            return photo.exifCreationDate ?? photo.fileCreationDate
+        }
+    }
+    
+    // Resort current photos according to sortMode
+    func resortPhotos() {
+        let comparator: (PhotoItem, PhotoItem) -> Bool = { a, b in
+            let da: Date
+            let db: Date
+            switch self.sortMode {
+            case .fileCreation:
+                da = a.fileCreationDate ?? .distantFuture
+                db = b.fileCreationDate ?? .distantFuture
+            case .exifPreferred:
+                da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
+                db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
+            }
+            return da < db
+        }
+        DispatchQueue.main.async {
+            self.photos.sort(by: comparator)
+        }
     }
     
     // Execute move for Group B items

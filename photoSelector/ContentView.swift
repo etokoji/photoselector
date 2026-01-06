@@ -78,6 +78,17 @@ struct ContentView: View {
                 
                 Spacer()
                 
+                // Sort mode picker
+                Picker("Date", selection: $viewModel.sortMode) {
+                    Text("File").tag(DateSortMode.fileCreation)
+                    Text("EXIF").tag(DateSortMode.exifPreferred)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 200)
+                .help("Sort by file creation date (fast) or EXIF date (slow)")
+                
+                Spacer()
+                
                 Button(action: {
                     viewModel.executeMoves()
                 }) {
@@ -154,11 +165,17 @@ struct ContentView: View {
                 viewModel.moveSelection(direction: .up, columns: actualColumns)
                 return .handled
             }
-            .onChange(of: viewModel.selectedFolderURL) { oldValue, newValue in
+.onChange(of: viewModel.selectedFolderURL) { oldValue, newValue in
                 if let url = newValue {
                     DispatchQueue.main.async {
                         viewModel.loadPhotos(from: url)
                     }
+                }
+            }
+            .onChange(of: viewModel.sortMode) { _, _ in
+                // Defer resort to avoid publishing during Picker update cycle
+                DispatchQueue.main.async {
+                    viewModel.resortPhotos()
                 }
             }
             .onKeyPress(.downArrow) {
@@ -587,6 +604,7 @@ struct RightSidePanel: View {
 struct SelectedPhotoPreview: View {
     let photo: PhotoItem?
     var onOpenPreview: (() -> Void)? = nil
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -646,7 +664,7 @@ struct SelectedPhotoPreview: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                         
-                        if let date = photo.creationDate {
+                        if let date = viewModel.displayedDate(for: photo) {
                             Text(formatDate(date))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
@@ -1090,7 +1108,7 @@ struct ImagePreviewWindowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     
-                    if let date = photo.creationDate {
+                    if let date = viewModel.displayedDate(for: photo) {
                         Text("(\(formatDate(date)))")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
