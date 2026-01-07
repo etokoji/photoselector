@@ -62,6 +62,7 @@ Additional behavior:
 
 - **Open Folder**: Opens a folder.
 - **Thumbnail Size Slider**: Changes the display size of photos (100–400px).
+- **Date Sort**: Choose "File" (default, faster) or "EXIF" (camera timestamp; slower). The preview date label follows this setting.
 - **Clear**: Resets all classifications.
 - **Photo Count**: Shows the number of currently loaded photos.
 - **Move Discarded**: Moves discarded photos (see destination policy above).
@@ -147,6 +148,12 @@ The following settings are automatically saved and restored on the next launch:
 - Magnified view window size
 
 Settings are saved automatically when you change them.
+
+## Sorting
+
+- Default: File creation date (fast; uses file system metadata only).
+- Optional: EXIF Date/Time (slower; reads image metadata and falls back to file date if missing).
+- Switch via the toolbar's "Date" segmented control (File / EXIF). The change is applied immediately.
 
 ## Tips
 
