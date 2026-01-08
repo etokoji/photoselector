@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import ImageIO
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
@@ -104,10 +105,17 @@ struct ContentView: View {
             
             // Main Content with Side Panel (use native NSSplitView via representable on macOS)
 #if os(macOS)
-            // Nested SplitView for 3-pane layout
+            // Nested SplitView for 3-pane layout (left panel: folder tree + EXIF)
             SplitViewRepresentable(
-                left: FolderTreeView(folderTree: viewModel.folderTree, selectedFolderURL: $viewModel.selectedFolderURL)
-                    .frame(minWidth: 150, idealWidth: 250),
+                left: VerticalSplitViewRepresentable(
+                    top: FolderTreeView(folderTree: viewModel.folderTree, selectedFolderURL: $viewModel.selectedFolderURL)
+                        .frame(minWidth: 150, idealWidth: 250),
+                    bottom: ExifInfoPanel()
+                        .frame(minWidth: 150, maxHeight: .infinity),
+                    minTop: 180,
+                    minBottom: 140,
+                    splitPositionKey: "LeftPanelVerticalSplitPosition"
+                ),
                 right: SplitViewRepresentable(
                     left: PhotoGridView(
                         photos: viewModel.photos,
@@ -618,6 +626,178 @@ struct RightSidePanel: View {
 #endif
     }
 }
+
+#if os(macOS)
+// MARK: - EXIF Info Panel (Folder sidebar)
+
+struct ExifInfoPanel: View {
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @State private var entries: [(String, String)] = []
+    @State private var isLoading = false
+    @State private var lastURL: URL?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "info.circle")
+                    .foregroundStyle(.secondary)
+                Text("EXIF Info")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(8)
+            .background(Material.bar)
+
+            Divider()
+
+            if isLoading {
+                VStack { Spacer(); ProgressView(); Spacer() }
+                    .frame(maxWidth: .infinity)
+            } else if entries.isEmpty {
+                VStack(spacing: 6) {
+                    Text("No EXIF available")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(entries.enumerated()), id: \.0) { _, pair in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(pair.0)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 120, alignment: .trailing)
+                                Text(pair.1)
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                Spacer()
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .onAppear { loadIfNeeded() }
+        .onChange(of: viewModel.primarySelectedPhotoID) { _, _ in
+            loadIfNeeded()
+        }
+    }
+
+    private func loadIfNeeded() {
+        guard let url = viewModel.selectedPhoto?.url else {
+            entries = []
+            lastURL = nil
+            return
+        }
+        if lastURL == url { return }
+        lastURL = url
+        if let cached = ExifMetadataProvider.shared.cachedEntries(for: url) {
+            entries = cached
+            return
+        }
+        isLoading = true
+        ExifMetadataProvider.shared.loadEntries(for: url) { result in
+            self.entries = result
+            self.isLoading = false
+        }
+    }
+}
+
+private final class ExifMetadataProvider {
+    static let shared = ExifMetadataProvider()
+    private let cache = NSCache<NSURL, NSArray>()
+    private init() {}
+
+    func cachedEntries(for url: URL) -> [(String, String)]? {
+        guard let raw = cache.object(forKey: url as NSURL) else { return nil }
+        var result: [(String, String)] = []
+        for case let pair as [String] in raw where pair.count == 2 {
+            result.append((pair[0], pair[1]))
+        }
+        return result
+    }
+
+    func loadEntries(for url: URL, completion: @escaping ([(String, String)]) -> Void) {
+        if let cached = cachedEntries(for: url) {
+            completion(cached)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let entries = self.extractEntries(from: url)
+            let array = entries.map { [$0.0, $0.1] } as NSArray
+            self.cache.setObject(array, forKey: url as NSURL)
+            DispatchQueue.main.async {
+                completion(entries)
+            }
+        }
+    }
+
+    private func extractEntries(from url: URL) -> [(String, String)] {
+        var list: [(String, String)] = []
+
+        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+                append("Make", value: tiff[kCGImagePropertyTIFFMake], to: &list)
+                append("Model", value: tiff[kCGImagePropertyTIFFModel], to: &list)
+                append("Software", value: tiff[kCGImagePropertyTIFFSoftware], to: &list)
+            }
+            if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+                append("DateTimeOriginal", value: exif[kCGImagePropertyExifDateTimeOriginal], to: &list)
+                append("CreateDate", value: exif[kCGImagePropertyExifDateTimeDigitized], to: &list)
+                append("ExposureTime", value: exif[kCGImagePropertyExifExposureTime], to: &list)
+                append("FNumber", value: exif[kCGImagePropertyExifFNumber], to: &list)
+                append("ISO", value: exif[kCGImagePropertyExifISOSpeedRatings], to: &list)
+                append("FocalLength", value: exif[kCGImagePropertyExifFocalLength], to: &list)
+                append("LensModel", value: exif[kCGImagePropertyExifLensModel], to: &list)
+            }
+            append("Orientation", value: props[kCGImagePropertyOrientation], to: &list)
+            append("ColorModel", value: props[kCGImagePropertyColorModel], to: &list)
+            append("PixelWidth", value: props[kCGImagePropertyPixelWidth], to: &list)
+            append("PixelHeight", value: props[kCGImagePropertyPixelHeight], to: &list)
+            append("DPIWidth", value: props[kCGImagePropertyDPIWidth], to: &list)
+            append("DPIHeight", value: props[kCGImagePropertyDPIHeight], to: &list)
+        }
+
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
+            if let created = attrs[.creationDate] as? Date {
+                list.append(("FileCreationDate", dateFormatter.string(from: created)))
+            }
+            if let modified = attrs[.modificationDate] as? Date {
+                list.append(("FileModificationDate", dateFormatter.string(from: modified)))
+            }
+        }
+
+        return list
+    }
+
+    private func append(_ label: String, value: Any?, to list: inout [(String, String)]) {
+        guard let stringValue = Self.string(from: value) else { return }
+        list.append((label, stringValue))
+    }
+
+    private static func string(from value: Any?) -> String? {
+        guard let value else { return nil }
+        if let s = value as? String { return s }
+        if let n = value as? NSNumber { return n.stringValue }
+        if let arr = value as? [Any] {
+            return arr.map { String(describing: $0) }.joined(separator: ", ")
+        }
+        return String(describing: value)
+    }
+
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.dateFormat = "yyyy年M月d日 H時m分s秒"
+        return formatter
+    }()
+}
+#endif
 
 struct SelectedPhotoPreview: View {
     let photo: PhotoItem?

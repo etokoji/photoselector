@@ -599,7 +599,7 @@ class PhotoSorterViewModel: ObservableObject {
         // Target folder: sibling of currentFolder, named "<currentFolderName>_没"
         let parentFolder = currentFolder.deletingLastPathComponent()
         let siblingFolderName = currentFolder.lastPathComponent + "_没"
-        var discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
+        let discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
         
         // Ensure destination exists. If we fail (sandbox, perms), fallback to subfolder "没" inside currentFolder
         func ensureDestination() -> URL? {
