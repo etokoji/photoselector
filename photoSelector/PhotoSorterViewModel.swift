@@ -602,6 +602,46 @@ class PhotoSorterViewModel: ObservableObject {
             self.photos.sort(by: comparator)
         }
     }
+
+#if os(macOS)
+    func urlsForDrag(startingAt photo: PhotoItem) -> [URL] {
+        var selected = selectedPhotoIDs
+        if !selected.contains(photo.id) {
+            selected = [photo.id]
+        }
+        let urls = photos.filter { selected.contains($0.id) }.map { $0.url }
+        return urls.isEmpty ? [photo.url] : urls
+    }
+
+    func movePhotos(at urls: [URL], to destinationFolder: URL) {
+        guard !urls.isEmpty else { return }
+        isProcessing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            for url in urls {
+                let destinationURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+                do {
+                    if fileManager.fileExists(atPath: destinationURL.path) {
+                        try fileManager.removeItem(at: destinationURL)
+                    }
+                    try fileManager.moveItem(at: url, to: destinationURL)
+                } catch {
+                    DispatchQueue.main.async {
+                        self.errorMessage = "Failed to move \(url.lastPathComponent): \(error.localizedDescription)"
+                        self.showError = true
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                if let current = self.currentFolder {
+                    self.loadPhotos(from: current)
+                }
+                self.refreshFolderTree()
+            }
+        }
+    }
+#endif
     
     // Execute move for Group B items
     func executeMoves() {

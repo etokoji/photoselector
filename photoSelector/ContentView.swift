@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import ImageIO
 
 struct ContentView: View {
@@ -344,11 +345,15 @@ struct FolderTreeView: View {
 
     var body: some View {
         List(folderTree, children: \.children, selection: $localSelection) { item in
+#if os(macOS)
+            FolderTreeRow(item: item, isSelected: localSelection == item.id)
+#else
             HStack {
                 Image(systemName: item.isFolder ? "folder" : "photo")
                 Text(item.name)
             }
             .padding(.vertical, 2)
+#endif
         }
         .listStyle(SidebarListStyle())
         // Keep local state and view model in sync without publishing during a view update
@@ -383,6 +388,7 @@ struct PhotoGridView: View {
     let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var isContextActive: Bool = false
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         GeometryReader { geometry in
@@ -457,6 +463,7 @@ struct PhotoGridItem: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -513,6 +520,9 @@ struct PhotoGridItem: View {
                 handleContextMenuAction(.unknown)
             }
         }
+#if os(macOS)
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+#endif
         .onChange(of: thumbnailSize) { oldValue, newValue in
             loadThumbnail()
         }
@@ -797,6 +807,61 @@ private final class ExifMetadataProvider {
         return formatter
     }()
 }
+
+struct FolderTreeRow: View {
+    let item: FileSystemItem
+    let isSelected: Bool
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @State private var isTargeted = false
+
+    var body: some View {
+        HStack {
+            Image(systemName: item.isFolder ? "folder" : "photo")
+            Text(item.name)
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .background(backgroundColor)
+        .cornerRadius(4)
+        .contentShape(Rectangle())
+        .dropDestination(for: PhotoDragPayload.self, action: { payloads, _ in
+            guard item.isFolder else { return false }
+            let urls = payloads.flatMap { $0.urls }
+            guard !urls.isEmpty else { return false }
+            viewModel.movePhotos(at: urls, to: item.id)
+            return true
+        }, isTargeted: { hovering in
+            isTargeted = hovering
+        })
+        .dropDestination(for: URL.self, action: { urls, _ in
+            guard item.isFolder else { return false }
+            guard !urls.isEmpty else { return false }
+            viewModel.movePhotos(at: urls, to: item.id)
+            return true
+        })
+    }
+
+    private var backgroundColor: Color {
+        if isTargeted {
+            return Color.accentColor.opacity(0.2)
+        } else if isSelected {
+            return Color.accentColor.opacity(0.1)
+        } else {
+            return .clear
+        }
+    }
+}
+
+struct PhotoDragPayload: Codable, Transferable {
+    let urls: [URL]
+
+    static let contentType = UTType(exportedAs: "dev.etokoji.photoSelector.photodrag")
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: contentType)
+    }
+}
 #endif
 
 struct SelectedPhotoPreview: View {
@@ -1039,6 +1104,7 @@ struct GroupAThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -1084,6 +1150,9 @@ struct GroupAThumbnail: View {
                 handleContextMenuAction(.unknown)
             }
         }
+#if os(macOS)
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+#endif
     }
     
     private func handleContextMenuAction(_ status: PhotoStatus) {
@@ -1224,6 +1293,7 @@ struct GroupBThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -1272,6 +1342,9 @@ struct GroupBThumbnail: View {
                 handleContextMenuAction(.unknown)
             }
         }
+#if os(macOS)
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+#endif
     }
     
     private func handleContextMenuAction(_ status: PhotoStatus) {
