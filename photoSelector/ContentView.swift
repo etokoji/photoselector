@@ -1517,6 +1517,21 @@ class CenteringClipView: NSClipView {
         return rect
     }
 }
+final class ObservingScrollView: NSScrollView {
+    var onUserZoom: (() -> Void)?
+
+    override func magnify(with event: NSEvent) {
+        super.magnify(with: event)
+        onUserZoom?()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        if event.phase == .changed || event.momentumPhase == .changed {
+            onUserZoom?()
+        }
+    }
+}
 
 // Capture right mouse down events to ensure selection before context menu shows
 struct RightClickCaptureView: NSViewRepresentable {
@@ -1551,7 +1566,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     var url: URL
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = ObservingScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
@@ -1579,10 +1594,17 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         
         // Configure magnification
         scrollView.allowsMagnification = true
-        scrollView.minMagnification = 1.0
+        scrollView.minMagnification = 0.05
         scrollView.maxMagnification = 10.0
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        let coordinator = context.coordinator
+        scrollView.onUserZoom = { [weak coordinator] in
+            coordinator?.userAdjustedZoom()
+        }
         
         context.coordinator.imageView = imageView
+        context.coordinator.scrollView = scrollView
+        context.coordinator.observeBoundsChanges()
         context.coordinator.loadImage(from: url)
         
         return scrollView
@@ -1591,6 +1613,8 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         if context.coordinator.currentURL != url {
             context.coordinator.loadImage(from: url)
+        } else {
+            context.coordinator.applyInitialFitIfNeeded()
         }
     }
 
@@ -1601,14 +1625,33 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     class Coordinator: NSObject {
         var parent: ZoomableAsyncImageView
         weak var imageView: NSImageView?
+        weak var scrollView: NSScrollView?
         var currentURL: URL?
+        private var didApplyInitialFit = false
+        private var lastAppliedFitScale: CGFloat?
+        private var boundsObserver: NSObjectProtocol?
+        private var pendingBoundsRefit = false
+        private var userHasAdjustedZoom = false
 
         init(_ parent: ZoomableAsyncImageView) {
             self.parent = parent
         }
-        
+        deinit {
+            if let observer = boundsObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        func observeBoundsChanges() {
+            guard boundsObserver == nil, let contentView = scrollView?.contentView else { return }
+            boundsObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: contentView, queue: .main) { [weak self] _ in
+                self?.handleBoundsChange()
+            }
+        }
         func loadImage(from url: URL) {
             self.currentURL = url
+            self.didApplyInitialFit = false
+            self.userHasAdjustedZoom = false
             DispatchQueue.global().async {
                 if let image = NSImage(contentsOf: url) {
                     DispatchQueue.main.async {
@@ -1616,20 +1659,103 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                         imageView.image = image
                         // Set frame size to image size for centering logic to work
                         imageView.frame.size = image.size
-                        self.resetZoom()
+                        self.applyInitialFitIfNeeded(force: true)
                     }
                 }
             }
         }
 
         @objc func handleDoubleClick(gesture: NSClickGestureRecognizer) {
-            resetZoom()
+            applyInitialFitIfNeeded(force: true, animated: true)
         }
-        
-        private func resetZoom() {
-            guard let scrollView = imageView?.enclosingScrollView else { return }
-            // Use animator to get a smooth zoom-out effect
-            scrollView.animator().magnification = 1.0
+
+        func applyInitialFitIfNeeded(force: Bool = false, animated: Bool = false) {
+            guard force || (!didApplyInitialFit && !userHasAdjustedZoom) else { return }
+            guard let scrollView = scrollView ?? imageView?.enclosingScrollView else { return }
+            guard let targetScale = calculateFitScale(for: scrollView) else { return }
+#if DEBUG
+            debugLog("applyInitialFitIfNeeded(force: \(force), animated: \(animated)) -> \(targetScale)")
+#endif
+            applyFit(scale: targetScale, in: scrollView, animated: animated)
+            didApplyInitialFit = true
         }
+
+        private func handleBoundsChange() {
+            guard !pendingBoundsRefit else { return }
+            pendingBoundsRefit = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let scrollView = self.scrollView else { return }
+                self.pendingBoundsRefit = false
+#if DEBUG
+                self.debugLog("bounds change detected (content size: \(scrollView.contentView.bounds.size))")
+#endif
+                self.performBoundsAwareFitIfNeeded(scrollView: scrollView)
+            }
+        }
+
+        private func performBoundsAwareFitIfNeeded(scrollView: NSScrollView) {
+            guard !userHasAdjustedZoom else { return }
+            guard let targetScale = calculateFitScale(for: scrollView) else { return }
+            scrollView.minMagnification = min(targetScale, 0.05)
+
+            guard let lastFit = lastAppliedFitScale else { return }
+            let tolerance: CGFloat = 0.002
+            if abs(scrollView.magnification - lastFit) <= tolerance {
+#if DEBUG
+                debugLog("auto-refit to \(targetScale) (current \(scrollView.magnification))")
+#endif
+                applyFit(scale: targetScale, in: scrollView, animated: false)
+            }
+        }
+
+        private func calculateFitScale(for scrollView: NSScrollView) -> CGFloat? {
+            guard let imageSize = imageView?.image?.size,
+                  imageSize.width > 0,
+                  imageSize.height > 0 else { return nil }
+
+            let boundsSize = scrollView.bounds.size
+            guard boundsSize.width > 0, boundsSize.height > 0 else { return nil }
+
+            let scaleX = boundsSize.width / imageSize.width
+            let scaleY = boundsSize.height / imageSize.height
+            let fitScale = min(scaleX, scaleY)
+            guard fitScale.isFinite, fitScale > 0 else { return nil }
+
+            return min(fitScale, 1.0)
+        }
+
+        private func applyFit(scale: CGFloat, in scrollView: NSScrollView, animated: Bool) {
+            let targetScale = max(min(scale, scrollView.maxMagnification), 0.01)
+            scrollView.minMagnification = min(targetScale, 0.05)
+
+            if animated {
+                NSAnimationContext.runAnimationGroup { _ in
+                    scrollView.animator().magnification = targetScale
+                }
+            } else {
+                scrollView.magnification = targetScale
+            }
+#if DEBUG
+            debugLog("applyFit -> \(targetScale), userHasAdjusted = \(userHasAdjustedZoom)")
+#endif
+
+            lastAppliedFitScale = targetScale
+            userHasAdjustedZoom = false
+        }
+
+        func userAdjustedZoom() {
+#if DEBUG
+            if !userHasAdjustedZoom {
+                debugLog("user adjusted zoom (current magnification: \(scrollView?.magnification ?? -1))")
+            }
+#endif
+            userHasAdjustedZoom = true
+        }
+
+#if DEBUG
+        private func debugLog(_ message: String) {
+            print("[ZoomableAsyncImageView] \(message)")
+        }
+#endif
     }
 }
