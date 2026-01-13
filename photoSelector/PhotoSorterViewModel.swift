@@ -120,6 +120,7 @@ class PhotoSorterViewModel: ObservableObject {
     // For Folder Tree
     @Published var folderTree: [FileSystemItem] = []
     @Published var selectedFolderURL: URL?
+    private var folderTreeRootURL: URL?
     
     // Column counts for keyboard navigation
     @Published var groupAColumns: Int = 2
@@ -137,7 +138,8 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     // Scan the root folder and build the folder tree
-    func buildFolderTree(from rootURL: URL) {
+    func buildFolderTree(from rootURL: URL, resetSelection: Bool = true) {
+        folderTreeRootURL = rootURL
         let fileManager = FileManager.default
         var items: [FileSystemItem] = []
         
@@ -159,17 +161,25 @@ class PhotoSorterViewModel: ObservableObject {
             self.showError = true
         }
         
+        // Sort children by localized name
+        items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
         // Add the root folder itself at the top
         self.folderTree = [
             FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)
         ]
         
-        // Initially select the root folder (defer to avoid publishing during folderTree view updates)
-        if selectedFolderURL == nil {
+        // Initially select the root folder or keep current selection based on flag
+        if selectedFolderURL == nil || resetSelection {
             DispatchQueue.main.async {
                 self.selectedFolderURL = rootURL
             }
         }
+    }
+
+    func refreshFolderTree() {
+        guard let root = folderTreeRootURL else { return }
+        buildFolderTree(from: root, resetSelection: false)
     }
     
     private func buildSubTree(from folderURL: URL) -> [FileSystemItem]? {
@@ -191,7 +201,11 @@ class PhotoSorterViewModel: ObservableObject {
             // Silently ignore errors for subfolders, or handle as needed
         }
         
-        return children.isEmpty ? nil : children
+        if !children.isEmpty {
+            let sorted = children.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            return sorted
+        }
+        return nil
     }
     
     // Load photos from a selected folder
@@ -600,6 +614,7 @@ class PhotoSorterViewModel: ObservableObject {
         let parentFolder = currentFolder.deletingLastPathComponent()
         let siblingFolderName = currentFolder.lastPathComponent + "_没"
         let discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
+        var didCreateDiscardFolder = false
         
         // Ensure destination exists. If we fail (sandbox, perms), fallback to subfolder "没" inside currentFolder
         func ensureDestination() -> URL? {
@@ -608,6 +623,7 @@ class PhotoSorterViewModel: ObservableObject {
             }
             do {
                 try fileManager.createDirectory(at: discardFolderURL, withIntermediateDirectories: true, attributes: nil)
+                didCreateDiscardFolder = true
                 return discardFolderURL
             } catch {
                 // Fallback
@@ -615,6 +631,7 @@ class PhotoSorterViewModel: ObservableObject {
                 do {
                     if !fileManager.fileExists(atPath: fallback.path) {
                         try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true, attributes: nil)
+                        didCreateDiscardFolder = true
                     }
                     DispatchQueue.main.async {
                         print("[Move] Could not create sibling discard folder (\(discardFolderURL.path)). Falling back to \(fallback.path). Error: \(error.localizedDescription)")
@@ -632,6 +649,12 @@ class PhotoSorterViewModel: ObservableObject {
         }
         
         guard let destinationRoot = ensureDestination() else { return }
+
+        if didCreateDiscardFolder {
+            DispatchQueue.main.async {
+                self.refreshFolderTree()
+            }
+        }
         
         let itemsToMove = photos.filter { $0.status == .groupB }
         
