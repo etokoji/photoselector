@@ -302,35 +302,36 @@ struct ContentView: View {
     }
     
     func openPreviewWindow(for photo: PhotoItem) {
-        // Close existing window if any
-        if let existingWindow = previewWindow {
-            existingWindow.close()
-        }
-        
         let previewView = ImagePreviewWindowView(viewModel: viewModel, onClose: {
             showImagePreview = false
         })
         let hostingController = NSHostingController(rootView: previewView)
-        
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "Image Preview"
-        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-        
-        // Restore saved window size or use default
-        let savedSize = PreviewWindowSizeManager.shared.restoreWindowSize()
-        window.setContentSize(savedSize)
-        window.center()
-        
-        // Set up delegate to save window size on changes and handle key events
+
         let windowDelegate = PreviewWindowDelegate(onClose: {
             showImagePreview = false
             self.previewWindow = nil // Clear reference on close
         }, mainWindow: NSApp.mainWindow)
+
+        if let window = previewWindow {
+            window.contentViewController = hostingController
+            window.delegate = windowDelegate
+            previewWindowDelegate = windowDelegate
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "Image Preview"
+        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+
+        // Restore saved window size or use default
+        let savedSize = PreviewWindowSizeManager.shared.restoreWindowSize()
+        window.setContentSize(savedSize)
+        window.center()
+
         window.delegate = windowDelegate
-        
         window.makeKeyAndOrderFront(nil)
-        
-        // Store window reference to prevent deallocation
+
         previewWindow = window
         previewWindowDelegate = windowDelegate
     }
@@ -1456,6 +1457,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
     private var localMonitor: Any?
     private weak var mainWindow: NSWindow?
+    private var didInvokeOnClose = false
     
     init(onClose: @escaping () -> Void, mainWindow: NSWindow?) {
         self.onClose = onClose
@@ -1472,7 +1474,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
             // Only handle events for this window
             if event.window == window {
                 if event.keyCode == 36 || event.keyCode == 76 {
-                    self.onClose()
+                    self.invokeOnCloseIfNeeded()
                     window.close()
                     return nil
                 }
@@ -1487,11 +1489,18 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
             NSEvent.removeMonitor(monitor)
             localMonitor = nil
         }
+        invokeOnCloseIfNeeded()
     }
     
     func windowDidResize(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         PreviewWindowSizeManager.shared.saveWindowSize(window.frame.size)
+    }
+
+    private func invokeOnCloseIfNeeded() {
+        guard !didInvokeOnClose else { return }
+        didInvokeOnClose = true
+        onClose()
     }
 }
 
@@ -1632,6 +1641,8 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         private var boundsObserver: NSObjectProtocol?
         private var pendingBoundsRefit = false
         private var userHasAdjustedZoom = false
+        private let actualPixelScale: CGFloat = 1.0
+        private let zoomToggleTolerance: CGFloat = 0.01
 
         init(_ parent: ZoomableAsyncImageView) {
             self.parent = parent
@@ -1666,7 +1677,14 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         }
 
         @objc func handleDoubleClick(gesture: NSClickGestureRecognizer) {
-            applyInitialFitIfNeeded(force: true, animated: true)
+            guard let scrollView = scrollView ?? imageView?.enclosingScrollView else { return }
+            let current = scrollView.magnification
+            if abs(current - actualPixelScale) < zoomToggleTolerance {
+                userHasAdjustedZoom = false
+                applyInitialFitIfNeeded(force: true, animated: true)
+            } else {
+                zoomToActualPixels(in: scrollView, animated: true)
+            }
         }
 
         func applyInitialFitIfNeeded(force: Bool = false, animated: Bool = false) {
@@ -1757,5 +1775,20 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             print("[ZoomableAsyncImageView] \(message)")
         }
 #endif
+
+        private func zoomToActualPixels(in scrollView: NSScrollView, animated: Bool) {
+            let clamped = max(min(actualPixelScale, scrollView.maxMagnification), 0.01)
+            if animated {
+                NSAnimationContext.runAnimationGroup { _ in
+                    scrollView.animator().magnification = clamped
+                }
+            } else {
+                scrollView.magnification = clamped
+            }
+#if DEBUG
+            debugLog("zoomToActualPixels -> \(clamped)")
+#endif
+            userHasAdjustedZoom = true
+        }
     }
 }
