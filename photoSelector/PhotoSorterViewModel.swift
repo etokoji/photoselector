@@ -490,6 +490,20 @@ class PhotoSorterViewModel: ObservableObject {
     func selectAllCurrentContext(deferred: Bool = false) {
         selectAll(in: selectionContext, deferred: deferred)
     }
+#if os(macOS)
+    func applyStatus(_ status: PhotoStatus, to urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let target = Set(urls.map { $0.standardizedFileURL })
+        DispatchQueue.main.async {
+            for i in 0..<self.photos.count {
+                let photoURL = self.photos[i].url.standardizedFileURL
+                if target.contains(photoURL) {
+                    self.photos[i].status = status
+                }
+            }
+        }
+    }
+#endif
 
     var hasSelectableItemsInCurrentContext: Bool {
         !selectableIDs(for: selectionContext).isEmpty

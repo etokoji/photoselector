@@ -431,6 +431,19 @@ struct PhotoGridView: View {
                         }
                     }
                 }
+#if os(macOS)
+                .dropDestination(for: PhotoDragPayload.self) { payloads, _ in
+                    let urls = payloads.flatMap { $0.urls }
+                    guard !urls.isEmpty else { return false }
+                    viewModel.applyStatus(.unknown, to: urls)
+                    return true
+                }
+                .dropDestination(for: URL.self) { urls, _ in
+                    guard !urls.isEmpty else { return false }
+                    viewModel.applyStatus(.unknown, to: urls)
+                    return true
+                }
+#endif
             }
         }
         .focusable()
@@ -1113,6 +1126,19 @@ struct GroupASidePanel: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+#if os(macOS)
+        .dropDestination(for: PhotoDragPayload.self) { payloads, _ in
+            let urls = payloads.flatMap { $0.urls }
+            guard !urls.isEmpty else { return false }
+            viewModel.applyStatus(.groupA, to: urls)
+            return true
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !urls.isEmpty else { return false }
+            viewModel.applyStatus(.groupA, to: urls)
+            return true
+        }
+#endif
     }
 }
 
@@ -1302,6 +1328,19 @@ struct GroupBSidePanel: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+#if os(macOS)
+        .dropDestination(for: PhotoDragPayload.self) { payloads, _ in
+            let urls = payloads.flatMap { $0.urls }
+            guard !urls.isEmpty else { return false }
+            viewModel.applyStatus(.groupB, to: urls)
+            return true
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !urls.isEmpty else { return false }
+            viewModel.applyStatus(.groupB, to: urls)
+            return true
+        }
+#endif
     }
 }
 
