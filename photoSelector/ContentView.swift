@@ -227,6 +227,24 @@ struct ContentView: View {
                 showImagePreview = true
                 return .handled
             }
+            .onKeyPress(KeyEquivalent("a"), phases: .down) { press in
+                if press.modifiers.contains(.command) {
+                    if viewModel.hasSelectableItemsInCurrentContext {
+                        viewModel.selectAllCurrentContext(deferred: true)
+                        return .handled
+                    }
+                }
+                return .ignored
+            }
+            .onKeyPress(KeyEquivalent("d"), phases: .down) { press in
+                if press.modifiers.contains(.command) {
+                    if viewModel.hasSelection {
+                        viewModel.clearSelection(deferred: true)
+                        return .handled
+                    }
+                }
+                return .ignored
+            }
 #else
             HSplitView {
                 // Main Grid

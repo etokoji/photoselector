@@ -471,17 +471,24 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
 
-    func selectAll(in context: SelectionContext) {
+    func selectAll(in context: SelectionContext, deferred: Bool = false) {
         let ids = selectableIDs(for: context)
         guard !ids.isEmpty else { return }
-        primarySelectedPhotoID = ids.first
-        selectedPhotoIDs = Set(ids)
-        selectionAnchorPhotoID = ids.first
-        selectionContext = context
+        let apply = {
+            self.selectionContext = context
+            self.primarySelectedPhotoID = ids.first
+            self.selectedPhotoIDs = Set(ids)
+            self.selectionAnchorPhotoID = ids.first
+        }
+        if deferred {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1), execute: apply)
+        } else {
+            apply()
+        }
     }
 
-    func selectAllCurrentContext() {
-        selectAll(in: selectionContext)
+    func selectAllCurrentContext(deferred: Bool = false) {
+        selectAll(in: selectionContext, deferred: deferred)
     }
 
     var hasSelectableItemsInCurrentContext: Bool {

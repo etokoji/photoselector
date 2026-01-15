@@ -45,6 +45,12 @@ struct photoSelectorApp: App {
                 }
                 .keyboardShortcut("a", modifiers: [.command])
                 .disabled(!viewModel.hasSelectableItemsInCurrentContext)
+
+                Button("選択解除") {
+                    viewModel.clearSelection()
+                }
+                .keyboardShortcut("d", modifiers: [.command])
+                .disabled(!viewModel.hasSelection)
             }
         }
     }
