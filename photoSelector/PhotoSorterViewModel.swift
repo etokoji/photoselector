@@ -181,6 +181,11 @@ class PhotoSorterViewModel: ObservableObject {
         guard let root = folderTreeRootURL else { return }
         buildFolderTree(from: root, resetSelection: false)
     }
+#if os(macOS)
+    var rootFolderURL: URL? {
+        folderTreeRootURL?.standardizedFileURL
+    }
+#endif
     
     private func buildSubTree(from folderURL: URL) -> [FileSystemItem]? {
         let fileManager = FileManager.default
@@ -491,6 +496,103 @@ class PhotoSorterViewModel: ObservableObject {
         selectAll(in: selectionContext, deferred: deferred)
     }
 #if os(macOS)
+    func createSubfolder(at parentURL: URL, named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let normalizedParent = parentURL.standardizedFileURL
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            let newURL = normalizedParent.appendingPathComponent(trimmed)
+            if fm.fileExists(atPath: newURL.path) {
+                DispatchQueue.main.async {
+                    self.presentError("同名のフォルダが既に存在します。")
+                }
+                return
+            }
+            do {
+                try fm.createDirectory(at: newURL, withIntermediateDirectories: false, attributes: nil)
+                DispatchQueue.main.async {
+                    self.selectedFolderURL = newURL
+                    self.refreshFolderTree()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.presentError("フォルダを作成できませんでした: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    func renameFolder(at folderURL: URL, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let normalizedURL = folderURL.standardizedFileURL
+        if let root = rootFolderURL, root == normalizedURL {
+            presentError("ルートフォルダの名前は変更できません。")
+            return
+        }
+        let destinationURL = normalizedURL.deletingLastPathComponent().appendingPathComponent(trimmed)
+        guard destinationURL != normalizedURL else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: destinationURL.path) {
+                DispatchQueue.main.async {
+                    self.presentError("同名のフォルダが既に存在します。")
+                }
+                return
+            }
+            do {
+                try fm.moveItem(at: normalizedURL, to: destinationURL)
+                DispatchQueue.main.async {
+                    if self.selectedFolderURL?.standardizedFileURL == normalizedURL {
+                        self.selectedFolderURL = destinationURL
+                    }
+                    if self.currentFolder?.standardizedFileURL == normalizedURL {
+                        self.currentFolder = destinationURL
+                    }
+                    self.refreshFolderTree()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.presentError("フォルダ名を変更できませんでした: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    func trashFolder(at folderURL: URL) {
+        let normalizedURL = folderURL.standardizedFileURL
+        if let root = rootFolderURL, root == normalizedURL {
+            presentError("ルートフォルダは削除できません。")
+            return
+        }
+        let parentURL = normalizedURL.deletingLastPathComponent()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            do {
+                try fm.trashItem(at: normalizedURL, resultingItemURL: nil)
+                DispatchQueue.main.async {
+                    if self.selectedFolderURL?.standardizedFileURL == normalizedURL {
+                        self.selectedFolderURL = parentURL
+                    }
+                    if let current = self.currentFolder?.standardizedFileURL {
+                        let deletedPath = normalizedURL.path
+                        if current.path == deletedPath || current.path.hasPrefix(deletedPath + "/") {
+                        self.currentFolder = parentURL
+                        self.photos = []
+                        }
+                    }
+                    self.refreshFolderTree()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.presentError("フォルダを削除できませんでした: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+#endif
+#if os(macOS)
     func applyStatus(_ status: PhotoStatus, to urls: [URL]) {
         guard !urls.isEmpty else { return }
         let target = Set(urls.map { $0.standardizedFileURL })
@@ -622,6 +724,11 @@ class PhotoSorterViewModel: ObservableObject {
         DispatchQueue.main.async {
             self.photos.sort(by: comparator)
         }
+    }
+    
+    private func presentError(_ message: String) {
+        self.errorMessage = message
+        self.showError = true
     }
 
 #if os(macOS)

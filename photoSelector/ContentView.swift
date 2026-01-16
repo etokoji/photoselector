@@ -395,6 +395,80 @@ struct FolderTreeView: View {
         }
     }
 }
+#if os(macOS)
+extension FolderTreeRow {
+    private var isRootFolder: Bool {
+        guard let root = viewModel.rootFolderURL else { return false }
+        return root == item.id.standardizedFileURL
+    }
+    
+    private var canRenameFolder: Bool {
+        item.isFolder && !isRootFolder
+    }
+    
+    private var canDeleteFolder: Bool {
+        item.isFolder && !isRootFolder
+    }
+    
+    private func ensureSelection() {
+        if viewModel.selectedFolderURL?.standardizedFileURL != item.id.standardizedFileURL {
+            viewModel.selectedFolderURL = item.id
+        }
+    }
+    
+    private func createSubfolder() {
+        guard item.isFolder else { return }
+        ensureSelection()
+        if let name = promptForFolderName(title: "新規フォルダ", message: "\(item.name) にフォルダを作成", defaultValue: "新しいフォルダ") {
+            viewModel.createSubfolder(at: item.id, named: name)
+        }
+    }
+    
+    private func renameFolder() {
+        guard canRenameFolder else { return }
+        ensureSelection()
+        if let name = promptForFolderName(title: "フォルダ名を変更", message: "\(item.name) の名前を変更", defaultValue: item.name) {
+            viewModel.renameFolder(at: item.id, to: name)
+        }
+    }
+    
+    private func deleteFolder() {
+        guard canDeleteFolder else { return }
+        ensureSelection()
+        if confirmFolderDeletion(name: item.name) {
+            viewModel.trashFolder(at: item.id)
+        }
+    }
+    
+    private func promptForFolderName(title: String, message: String, defaultValue: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "キャンセル")
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        textField.stringValue = defaultValue
+        textField.placeholderString = "フォルダ名"
+        alert.accessoryView = textField
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let trimmed = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+    
+    private func confirmFolderDeletion(name: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "フォルダを削除"
+        alert.informativeText = "\"\(name)\" をゴミ箱に移動しますか？"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+}
+#endif
 
 struct PhotoGridView: View {
     let photos: [PhotoItem]
@@ -872,6 +946,26 @@ struct FolderTreeRow: View {
             viewModel.movePhotos(at: urls, to: item.id)
             return true
         })
+#if os(macOS)
+        .contextMenu {
+            Button("新規フォルダ") {
+                createSubfolder()
+            }
+            .disabled(!item.isFolder)
+            
+            Button("フォルダ名を変更") {
+                renameFolder()
+            }
+            .disabled(!canRenameFolder)
+            
+            Divider()
+            
+            Button("フォルダを削除") {
+                deleteFolder()
+            }
+            .disabled(!canDeleteFolder)
+        }
+#endif
     }
 
     private var backgroundColor: Color {
