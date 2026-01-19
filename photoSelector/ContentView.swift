@@ -468,6 +468,130 @@ extension FolderTreeRow {
         return alert.runModal() == .alertFirstButtonReturn
     }
 }
+
+@MainActor
+private struct FolderDropDelegate: DropDelegate {
+    let item: FileSystemItem
+    let viewModel: PhotoSorterViewModel
+    @Binding var isTargeted: Bool
+    
+    func validateDrop(info: DropInfo) -> Bool {
+        item.isFolder
+    }
+    
+    func dropEntered(info: DropInfo) {
+        if item.isFolder {
+            isTargeted = true
+        }
+    }
+    
+    func dropExited(info: DropInfo) {
+        isTargeted = false
+    }
+    
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard item.isFolder else { return DropProposal(operation: .forbidden) }
+        return DropProposal(operation: isCopyGesture ? .copy : .move)
+    }
+    
+    func performDrop(info: DropInfo) -> Bool {
+        guard item.isFolder else { return false }
+        isTargeted = false
+        let copy = isCopyGesture
+        Task {
+            let urls = await loadURLs(from: info)
+            guard !urls.isEmpty else { return }
+            if copy {
+                viewModel.copyPhotos(at: urls, to: item.id)
+            } else {
+                viewModel.movePhotos(at: urls, to: item.id)
+            }
+        }
+        return true
+    }
+    
+    private var isCopyGesture: Bool {
+        NSEvent.modifierFlags.contains(.option)
+    }
+    
+    private func loadURLs(from info: DropInfo) async -> [URL] {
+        var results: [URL] = []
+        let payloadProviders = info.itemProviders(for: [PhotoDragPayload.contentType])
+        for provider in payloadProviders {
+            if let payload = await loadTransferable(PhotoDragPayload.self, from: provider) {
+                results.append(contentsOf: payload.urls)
+            }
+        }
+        if results.isEmpty {
+            for provider in info.itemProviders(for: [.fileURL]) {
+                if let url = await loadTransferable(URL.self, from: provider) {
+                    results.append(url)
+                }
+            }
+        }
+        return results
+    }
+    
+    private func loadTransferable<T: Transferable>(_ type: T.Type, from provider: NSItemProvider) async -> T? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadTransferable(type: type) { result in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: value)
+                case .failure:
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+}
+@MainActor
+private struct PhotoGridDropDelegate: DropDelegate {
+    let viewModel: PhotoSorterViewModel
+    
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: isCopyGesture ? .copy : .move)
+    }
+    
+    func performDrop(info: DropInfo) -> Bool {
+        Task {
+            let urls = await loadURLs(from: info)
+            guard !urls.isEmpty else { return }
+            viewModel.applyStatus(.unknown, to: urls)
+        }
+        return true
+    }
+    
+    private var isCopyGesture: Bool {
+        NSEvent.modifierFlags.contains(.option)
+    }
+    
+    private func loadURLs(from info: DropInfo) async -> [URL] {
+        var urls: [URL] = []
+        for provider in info.itemProviders(for: [PhotoDragPayload.contentType]) {
+            if let payload = await loadTransferable(PhotoDragPayload.self, from: provider) {
+                urls.append(contentsOf: payload.urls)
+            }
+        }
+        if urls.isEmpty {
+            for provider in info.itemProviders(for: [.fileURL]) {
+                if let url = await loadTransferable(URL.self, from: provider) {
+                    urls.append(url)
+                }
+            }
+        }
+        return urls
+    }
+    
+    private func loadTransferable<T: Transferable>(_ type: T.Type,
+                                                   from provider: NSItemProvider) async -> T? {
+        await withCheckedContinuation { continuation in
+            _ = provider.loadTransferable(type: type) { result in
+                continuation.resume(returning: try? result.get())
+            }
+        }
+    }
+}
 #endif
 
 struct PhotoGridView: View {
@@ -506,17 +630,8 @@ struct PhotoGridView: View {
                     }
                 }
 #if os(macOS)
-                .dropDestination(for: PhotoDragPayload.self) { payloads, _ in
-                    let urls = payloads.flatMap { $0.urls }
-                    guard !urls.isEmpty else { return false }
-                    viewModel.applyStatus(.unknown, to: urls)
-                    return true
-                }
-                .dropDestination(for: URL.self) { urls, _ in
-                    guard !urls.isEmpty else { return false }
-                    viewModel.applyStatus(.unknown, to: urls)
-                    return true
-                }
+                .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
+                        delegate: PhotoGridDropDelegate(viewModel: viewModel))
 #endif
             }
         }
@@ -931,21 +1046,10 @@ struct FolderTreeRow: View {
         .background(backgroundColor)
         .cornerRadius(4)
         .contentShape(Rectangle())
-        .dropDestination(for: PhotoDragPayload.self, action: { payloads, _ in
-            guard item.isFolder else { return false }
-            let urls = payloads.flatMap { $0.urls }
-            guard !urls.isEmpty else { return false }
-            viewModel.movePhotos(at: urls, to: item.id)
-            return true
-        }, isTargeted: { hovering in
-            isTargeted = hovering
-        })
-        .dropDestination(for: URL.self, action: { urls, _ in
-            guard item.isFolder else { return false }
-            guard !urls.isEmpty else { return false }
-            viewModel.movePhotos(at: urls, to: item.id)
-            return true
-        })
+        .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
+                delegate: FolderDropDelegate(item: item,
+                                             viewModel: viewModel,
+                                             isTargeted: $isTargeted))
 #if os(macOS)
         .contextMenu {
             Button("新規フォルダ") {
@@ -1633,7 +1737,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
             return event
         }
     }
-    
+
     func windowWillClose(_ notification: Notification) {
         // Clean up event monitor
         if let monitor = localMonitor {

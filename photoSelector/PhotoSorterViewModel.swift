@@ -605,6 +605,70 @@ class PhotoSorterViewModel: ObservableObject {
             }
         }
     }
+    func copyPhotos(at urls: [URL], to destinationFolder: URL) {
+        guard !urls.isEmpty else { return }
+        let destination = destinationFolder.standardizedFileURL
+        isProcessing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            for url in urls {
+                let sourceURL = url.standardizedFileURL
+                let baseDestination = destination.appendingPathComponent(sourceURL.lastPathComponent)
+                let targetURL = self.uniqueCopyURL(for: baseDestination, fileManager: fm)
+                do {
+                    try fm.copyItem(at: sourceURL, to: targetURL)
+                } catch {
+                    DispatchQueue.main.async {
+                        self.presentError("ファイルをコピーできませんでした: \(error.localizedDescription)")
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                if let current = self.currentFolder?.standardizedFileURL, current == destination {
+                    self.loadPhotos(from: destination)
+                } else {
+                    self.refreshFolderTree()
+                }
+            }
+        }
+    }
+    
+    private func uniqueCopyURL(for destination: URL, fileManager: FileManager) -> URL {
+        uniqueURL(for: destination, fileManager: fileManager) { index in
+            index == 1 ? " copy" : " copy \(index)"
+        }
+    }
+    
+    private func uniqueMoveURL(for destination: URL, fileManager: FileManager) -> URL {
+        uniqueURL(for: destination, fileManager: fileManager) { index in
+            index == 1 ? " move" : " move \(index)"
+        }
+    }
+    
+    private func uniqueURL(for destination: URL,
+                           fileManager: FileManager,
+                           suffixBuilder: (Int) -> String) -> URL {
+        if !fileManager.fileExists(atPath: destination.path) {
+            return destination
+        }
+        let directory = destination.deletingLastPathComponent()
+        let baseName = destination.deletingPathExtension().lastPathComponent
+        let ext = destination.pathExtension
+        var index = 1
+        while true {
+            let suffix = suffixBuilder(index)
+            var candidateName = baseName + suffix
+            if !ext.isEmpty {
+                candidateName += ".\(ext)"
+            }
+            let candidateURL = directory.appendingPathComponent(candidateName)
+            if !fileManager.fileExists(atPath: candidateURL.path) {
+                return candidateURL
+            }
+            index += 1
+        }
+    }
 #endif
 
     var hasSelectableItemsInCurrentContext: Bool {
@@ -743,20 +807,24 @@ class PhotoSorterViewModel: ObservableObject {
 
     func movePhotos(at urls: [URL], to destinationFolder: URL) {
         guard !urls.isEmpty else { return }
+        let destinationFolder = destinationFolder.standardizedFileURL
         isProcessing = true
         DispatchQueue.global(qos: .userInitiated).async {
             let fileManager = FileManager.default
             for url in urls {
-                let destinationURL = destinationFolder.appendingPathComponent(url.lastPathComponent)
+                let sourceURL = url.standardizedFileURL
+                var destinationURL = destinationFolder.appendingPathComponent(sourceURL.lastPathComponent)
+                if sourceURL == destinationURL {
+                    continue
+                }
                 do {
                     if fileManager.fileExists(atPath: destinationURL.path) {
-                        try fileManager.removeItem(at: destinationURL)
+                        destinationURL = self.uniqueMoveURL(for: destinationURL, fileManager: fileManager)
                     }
-                    try fileManager.moveItem(at: url, to: destinationURL)
+                    try fileManager.moveItem(at: sourceURL, to: destinationURL)
                 } catch {
                     DispatchQueue.main.async {
-                        self.errorMessage = "Failed to move \(url.lastPathComponent): \(error.localizedDescription)"
-                        self.showError = true
+                        self.presentError("Failed to move \(sourceURL.lastPathComponent): \(error.localizedDescription)")
                     }
                 }
             }
