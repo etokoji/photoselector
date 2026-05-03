@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var previewWindowDelegate: PreviewWindowDelegate?
     // Bridge state to avoid publishing during view updates
     @State private var localSortMode: DateSortMode = .fileCreation
+    @AppStorage("FolderPanelsAreVertical") private var folderPanelsAreVertical = false
     
     // Monitor for Option key state
     private var isOptionPressed: Bool {
@@ -49,9 +50,17 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Toolbar Area
             HStack {
-                Button(action: selectFolder) {
-                    Label("Open Folder", systemImage: "folder")
+                Button(action: { selectFolder(for: .primary) }) {
+                    Label("Open Folder 1", systemImage: "folder")
                 }
+                
+                Button(action: { selectFolder(for: .secondary) }) {
+                    Label("Open Folder 2", systemImage: "externaldrive")
+                }
+                
+                Toggle("縦並び", isOn: $folderPanelsAreVertical)
+                    .toggleStyle(.switch)
+                    .help("フォルダーパネルを縦並び/横並びに切り替え")
                 
                 Spacer()
                 
@@ -109,11 +118,16 @@ struct ContentView: View {
             // Nested SplitView for 3-pane layout (left panel: folder tree + EXIF)
             SplitViewRepresentable(
                 left: VerticalSplitViewRepresentable(
-                    top: FolderTreeView(folderTree: viewModel.folderTree, selectedFolderURL: $viewModel.selectedFolderURL)
-                        .frame(minWidth: 150, idealWidth: 250),
+                    top: FolderPanelsContainer(
+                        primaryFolderTree: viewModel.folderTree,
+                        primarySelectedFolderURL: $viewModel.selectedFolderURL,
+                        secondaryFolderTree: viewModel.secondaryFolderTree,
+                        secondarySelectedFolderURL: $viewModel.secondarySelectedFolderURL,
+                        isVertical: folderPanelsAreVertical
+                    ),
                     bottom: ExifInfoPanel()
                         .frame(minWidth: 150, maxHeight: .infinity),
-                    minTop: 180,
+                    minTop: folderPanelsAreVertical ? 240 : 180,
                     minBottom: 140,
                     splitPositionKey: "LeftPanelVerticalSplitPosition"
                 ),
@@ -167,7 +181,7 @@ struct ContentView: View {
                     minRight: 200,
                     splitPositionKey: "ContentSplitPosition"
                 ),
-                minLeft: 150,
+                minLeft: 300,
                 minRight: 600,
                 splitPositionKey: "MainSplitPosition"
             )
@@ -176,14 +190,29 @@ struct ContentView: View {
                 viewModel.moveSelection(direction: .up, columns: actualColumns)
                 return .handled
             }
-.onChange(of: viewModel.selectedFolderURL) { oldValue, newValue in
+            .onChange(of: viewModel.selectedFolderURL) { _, newValue in
                 if let url = newValue {
                     DispatchQueue.main.async {
-                        viewModel.loadPhotos(from: url)
+                        loadPhotosIfPanelActive(url, panel: .primary)
                     }
                 }
             }
-.onAppear {
+            .onChange(of: viewModel.secondarySelectedFolderURL) { _, newValue in
+                if let url = newValue {
+                    DispatchQueue.main.async {
+                        loadPhotosIfPanelActive(url, panel: .secondary)
+                    }
+                }
+            }
+            .onChange(of: viewModel.activeFolderPanel) { _, newValue in
+                guard let newValue,
+                      let url = viewModel.selectedFolderURL(for: newValue)
+                else { return }
+                DispatchQueue.main.async {
+                    viewModel.loadPhotos(from: url)
+                }
+            }
+            .onAppear {
                 // Initialize bridge state
                 localSortMode = viewModel.sortMode
             }
@@ -219,7 +248,7 @@ struct ContentView: View {
             }
             .onKeyPress(.space) {
                 // Space: Toggle status
-                viewModel.toggleSelectedPhotoStatus()
+                viewModel.toggleSelectedPhotoStatus(deferred: true)
                 return .handled
             }
             .onKeyPress(.return) {
@@ -305,7 +334,7 @@ struct ContentView: View {
         }
     }
     
-    func selectFolder() {
+    func selectFolder(for panelKind: FolderPanelKind) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -314,9 +343,14 @@ struct ContentView: View {
         
         if panel.runModal() == .OK {
             if let url = panel.url {
-                viewModel.buildFolderTree(from: url)
+                viewModel.buildFolderTree(from: url, in: panelKind)
             }
         }
+    }
+    
+    private func loadPhotosIfPanelActive(_ url: URL, panel: FolderPanelKind) {
+        guard viewModel.activeFolderPanel == panel else { return }
+        viewModel.loadPhotos(from: url)
     }
     
     func openPreviewWindow(for photo: PhotoItem) {
@@ -357,15 +391,105 @@ struct ContentView: View {
 
 // MARK: - Subviews for ContentView
 
+struct FolderPanelsContainer: View {
+    let primaryFolderTree: [FileSystemItem]
+    @Binding var primarySelectedFolderURL: URL?
+    let secondaryFolderTree: [FileSystemItem]
+    @Binding var secondarySelectedFolderURL: URL?
+    let isVertical: Bool
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+
+    var body: some View {
+        if isVertical {
+            VerticalSplitViewRepresentable(
+                top: primaryPanel
+                    .frame(minHeight: 120),
+                bottom: secondaryPanel
+                    .frame(minHeight: 120),
+                minTop: 120,
+                minBottom: 120,
+                splitPositionKey: "FolderPanelsVerticalSplitPosition"
+            )
+        } else {
+            SplitViewRepresentable(
+                left: primaryPanel
+                    .frame(minWidth: 150, idealWidth: 250),
+                right: secondaryPanel
+                    .frame(minWidth: 150, idealWidth: 250),
+                minLeft: 150,
+                minRight: 150,
+                splitPositionKey: "FolderPanelsSplitPosition"
+            )
+        }
+    }
+    
+    private var primaryPanel: some View {
+        FolderTreePanel(
+            title: panelTitle("Folder 1", panel: .primary),
+            folderTree: primaryFolderTree,
+            selectedFolderURL: $primarySelectedFolderURL,
+            panelKind: .primary
+        )
+    }
+    
+    private var secondaryPanel: some View {
+        FolderTreePanel(
+            title: panelTitle("Folder 2", panel: .secondary),
+            folderTree: secondaryFolderTree,
+            selectedFolderURL: $secondarySelectedFolderURL,
+            panelKind: .secondary
+        )
+    }
+    
+    private func panelTitle(_ fallback: String, panel: FolderPanelKind) -> String {
+        guard let name = viewModel.rootFolderDisplayName(for: panel) else {
+            return fallback
+        }
+        return "\(fallback): \(name)"
+    }
+}
+
+struct FolderTreePanel: View {
+    let title: String
+    let folderTree: [FileSystemItem]
+    @Binding var selectedFolderURL: URL?
+    let panelKind: FolderPanelKind
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Material.bar)
+            
+            FolderTreeView(folderTree: folderTree,
+                           selectedFolderURL: $selectedFolderURL,
+                           panelKind: panelKind)
+        }
+    }
+}
+
 struct FolderTreeView: View {
     let folderTree: [FileSystemItem]
     @Binding var selectedFolderURL: URL?
+    let panelKind: FolderPanelKind
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     @State private var localSelection: URL?
 
     var body: some View {
-        List(folderTree, children: \.children, selection: $localSelection) { item in
+        List(folderTree, children: \.children) { item in
 #if os(macOS)
-            FolderTreeRow(item: item, isSelected: localSelection == item.id)
+            FolderTreeRow(item: item,
+                          isSelected: isSelected(item.id),
+                          panelKind: panelKind,
+                          onSelect: {
+                              selectFolder(item.id)
+                          })
 #else
             HStack {
                 Image(systemName: item.isFolder ? "folder" : "photo")
@@ -378,13 +502,13 @@ struct FolderTreeView: View {
         // Keep local state and view model in sync without publishing during a view update
         .onAppear {
             // Initialize local selection from model
-            localSelection = selectedFolderURL
+            localSelection = selectedFolderURL ?? folderTree.first?.id
         }
         .onChange(of: localSelection) { _, newValue in
             // Propagate user-driven selection changes to the view model on the next runloop
-            guard selectedFolderURL != newValue else { return }
+            guard let newValue, selectedFolderURL != newValue else { return }
             DispatchQueue.main.async {
-                selectedFolderURL = newValue
+                viewModel.setSelectedFolderURL(newValue, for: panelKind)
             }
         }
         .onChange(of: selectedFolderURL) { _, newValue in
@@ -393,12 +517,30 @@ struct FolderTreeView: View {
                 localSelection = newValue
             }
         }
+        .onChange(of: folderTree) { _, _ in
+            // Re-apply selection when the whole tree changes, even if the selected URL value did not.
+            if let selectedFolderURL {
+                localSelection = selectedFolderURL
+            } else if let root = folderTree.first?.id {
+                localSelection = root
+            }
+        }
+    }
+    
+    private func selectFolder(_ url: URL) {
+        localSelection = url
+        viewModel.setSelectedFolderURL(url, for: panelKind)
+    }
+    
+    private func isSelected(_ url: URL) -> Bool {
+        localSelection?.standardizedFileURL == url.standardizedFileURL ||
+        selectedFolderURL?.standardizedFileURL == url.standardizedFileURL
     }
 }
 #if os(macOS)
 extension FolderTreeRow {
     private var isRootFolder: Bool {
-        guard let root = viewModel.rootFolderURL else { return false }
+        guard let root = viewModel.rootFolderURL(for: panelKind) else { return false }
         return root == item.id.standardizedFileURL
     }
     
@@ -411,8 +553,8 @@ extension FolderTreeRow {
     }
     
     private func ensureSelection() {
-        if viewModel.selectedFolderURL?.standardizedFileURL != item.id.standardizedFileURL {
-            viewModel.selectedFolderURL = item.id
+        if viewModel.selectedFolderURL(for: panelKind)?.standardizedFileURL != item.id.standardizedFileURL {
+            viewModel.setSelectedFolderURL(item.id, for: panelKind)
         }
     }
     
@@ -420,7 +562,7 @@ extension FolderTreeRow {
         guard item.isFolder else { return }
         ensureSelection()
         if let name = promptForFolderName(title: "新規フォルダ", message: "\(item.name) にフォルダを作成", defaultValue: "新しいフォルダ") {
-            viewModel.createSubfolder(at: item.id, named: name)
+            viewModel.createSubfolder(at: item.id, named: name, in: panelKind)
         }
     }
     
@@ -428,7 +570,7 @@ extension FolderTreeRow {
         guard canRenameFolder else { return }
         ensureSelection()
         if let name = promptForFolderName(title: "フォルダ名を変更", message: "\(item.name) の名前を変更", defaultValue: item.name) {
-            viewModel.renameFolder(at: item.id, to: name)
+            viewModel.renameFolder(at: item.id, to: name, in: panelKind)
         }
     }
     
@@ -436,7 +578,7 @@ extension FolderTreeRow {
         guard canDeleteFolder else { return }
         ensureSelection()
         if confirmFolderDeletion(name: item.name) {
-            viewModel.trashFolder(at: item.id)
+            viewModel.trashFolder(at: item.id, in: panelKind)
         }
     }
     
@@ -1032,6 +1174,8 @@ private final class ExifMetadataProvider {
 struct FolderTreeRow: View {
     let item: FileSystemItem
     let isSelected: Bool
+    let panelKind: FolderPanelKind
+    let onSelect: () -> Void
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
     @State private var isTargeted = false
 
@@ -1041,11 +1185,14 @@ struct FolderTreeRow: View {
             Text(item.name)
             Spacer()
         }
+        .foregroundStyle(isActiveSelection ? Color.white : Color.primary)
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
         .background(backgroundColor)
         .cornerRadius(4)
         .contentShape(Rectangle())
+        .listRowBackground(backgroundColor)
+        .onTapGesture(perform: onSelect)
         .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
                 delegate: FolderDropDelegate(item: item,
                                              viewModel: viewModel,
@@ -1075,11 +1222,15 @@ struct FolderTreeRow: View {
     private var backgroundColor: Color {
         if isTargeted {
             return Color.accentColor.opacity(0.2)
-        } else if isSelected {
-            return Color.accentColor.opacity(0.1)
+        } else if isActiveSelection {
+            return Color.accentColor
         } else {
             return .clear
         }
+    }
+    
+    private var isActiveSelection: Bool {
+        isSelected && viewModel.activeFolderPanel == panelKind
     }
 }
 

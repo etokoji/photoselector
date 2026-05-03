@@ -93,6 +93,11 @@ enum DateSortMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum FolderPanelKind: Equatable {
+    case primary
+    case secondary
+}
+
 class PhotoSorterViewModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
     @Published var sortMode: DateSortMode {
@@ -121,6 +126,10 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var folderTree: [FileSystemItem] = []
     @Published var selectedFolderURL: URL?
     private var folderTreeRootURL: URL?
+    @Published var secondaryFolderTree: [FileSystemItem] = []
+    @Published var secondarySelectedFolderURL: URL?
+    private var secondaryFolderTreeRootURL: URL?
+    @Published var activeFolderPanel: FolderPanelKind?
     
     // Column counts for keyboard navigation
     @Published var groupAColumns: Int = 2
@@ -138,8 +147,7 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     // Scan the root folder and build the folder tree
-    func buildFolderTree(from rootURL: URL, resetSelection: Bool = true) {
-        folderTreeRootURL = rootURL
+    func buildFolderTree(from rootURL: URL, in panel: FolderPanelKind = .primary, resetSelection: Bool = true) {
         let fileManager = FileManager.default
         var items: [FileSystemItem] = []
         
@@ -165,25 +173,86 @@ class PhotoSorterViewModel: ObservableObject {
         items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         // Add the root folder itself at the top
-        self.folderTree = [
-            FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)
-        ]
+        let tree = [FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)]
         
         // Initially select the root folder or keep current selection based on flag
-        if selectedFolderURL == nil || resetSelection {
-            DispatchQueue.main.async {
-                self.selectedFolderURL = rootURL
+        switch panel {
+        case .primary:
+            folderTreeRootURL = rootURL
+            folderTree = tree
+            if selectedFolderURL == nil || resetSelection {
+                selectedFolderURL = rootURL
             }
+        case .secondary:
+            secondaryFolderTreeRootURL = rootURL
+            secondaryFolderTree = tree
+            if secondarySelectedFolderURL == nil || resetSelection {
+                secondarySelectedFolderURL = rootURL
+            }
+        }
+        if resetSelection {
+            activeFolderPanel = panel
         }
     }
 
-    func refreshFolderTree() {
-        guard let root = folderTreeRootURL else { return }
-        buildFolderTree(from: root, resetSelection: false)
+    func refreshFolderTree(for panel: FolderPanelKind = .primary) {
+        switch panel {
+        case .primary:
+            guard let root = folderTreeRootURL else { return }
+            buildFolderTree(from: root, in: .primary, resetSelection: false)
+        case .secondary:
+            guard let root = secondaryFolderTreeRootURL else { return }
+            buildFolderTree(from: root, in: .secondary, resetSelection: false)
+        }
+    }
+    
+    func refreshAllFolderTrees() {
+        refreshFolderTree(for: .primary)
+        refreshFolderTree(for: .secondary)
     }
 #if os(macOS)
     var rootFolderURL: URL? {
         folderTreeRootURL?.standardizedFileURL
+    }
+    
+    func rootFolderURL(for panel: FolderPanelKind) -> URL? {
+        switch panel {
+        case .primary:
+            return folderTreeRootURL?.standardizedFileURL
+        case .secondary:
+            return secondaryFolderTreeRootURL?.standardizedFileURL
+        }
+    }
+    
+    func rootFolderDisplayName(for panel: FolderPanelKind) -> String? {
+        guard let root = rootFolderURL(for: panel) else { return nil }
+        let fm = FileManager.default
+        if let values = try? root.resourceValues(forKeys: [.volumeNameKey]),
+           let volumeName = values.volumeName,
+           !volumeName.isEmpty {
+            return volumeName
+        }
+        let displayName = fm.displayName(atPath: root.path)
+        return displayName.isEmpty ? root.lastPathComponent : displayName
+    }
+    
+    func selectedFolderURL(for panel: FolderPanelKind) -> URL? {
+        switch panel {
+        case .primary:
+            return selectedFolderURL
+        case .secondary:
+            return secondarySelectedFolderURL
+        }
+    }
+    
+    func setSelectedFolderURL(_ url: URL, for panel: FolderPanelKind) {
+        switch panel {
+        case .primary:
+            selectedFolderURL = url
+        case .secondary:
+            secondarySelectedFolderURL = url
+        }
+        activeFolderPanel = panel
     }
 #endif
     
@@ -496,7 +565,7 @@ class PhotoSorterViewModel: ObservableObject {
         selectAll(in: selectionContext, deferred: deferred)
     }
 #if os(macOS)
-    func createSubfolder(at parentURL: URL, named name: String) {
+    func createSubfolder(at parentURL: URL, named name: String, in panel: FolderPanelKind = .primary) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let normalizedParent = parentURL.standardizedFileURL
@@ -512,8 +581,8 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.createDirectory(at: newURL, withIntermediateDirectories: false, attributes: nil)
                 DispatchQueue.main.async {
-                    self.selectedFolderURL = newURL
-                    self.refreshFolderTree()
+                    self.setSelectedFolderURL(newURL, for: panel)
+                    self.refreshFolderTree(for: panel)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -523,11 +592,11 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
     
-    func renameFolder(at folderURL: URL, to newName: String) {
+    func renameFolder(at folderURL: URL, to newName: String, in panel: FolderPanelKind = .primary) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let normalizedURL = folderURL.standardizedFileURL
-        if let root = rootFolderURL, root == normalizedURL {
+        if let root = rootFolderURL(for: panel), root == normalizedURL {
             presentError("ルートフォルダの名前は変更できません。")
             return
         }
@@ -544,13 +613,13 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.moveItem(at: normalizedURL, to: destinationURL)
                 DispatchQueue.main.async {
-                    if self.selectedFolderURL?.standardizedFileURL == normalizedURL {
-                        self.selectedFolderURL = destinationURL
+                    if self.selectedFolderURL(for: panel)?.standardizedFileURL == normalizedURL {
+                        self.setSelectedFolderURL(destinationURL, for: panel)
                     }
                     if self.currentFolder?.standardizedFileURL == normalizedURL {
                         self.currentFolder = destinationURL
                     }
-                    self.refreshFolderTree()
+                    self.refreshAllFolderTrees()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -560,9 +629,9 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
     
-    func trashFolder(at folderURL: URL) {
+    func trashFolder(at folderURL: URL, in panel: FolderPanelKind = .primary) {
         let normalizedURL = folderURL.standardizedFileURL
-        if let root = rootFolderURL, root == normalizedURL {
+        if let root = rootFolderURL(for: panel), root == normalizedURL {
             presentError("ルートフォルダは削除できません。")
             return
         }
@@ -572,24 +641,65 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.trashItem(at: normalizedURL, resultingItemURL: nil)
                 DispatchQueue.main.async {
-                    if self.selectedFolderURL?.standardizedFileURL == normalizedURL {
-                        self.selectedFolderURL = parentURL
-                    }
-                    if let current = self.currentFolder?.standardizedFileURL {
-                        let deletedPath = normalizedURL.path
-                        if current.path == deletedPath || current.path.hasPrefix(deletedPath + "/") {
-                        self.currentFolder = parentURL
-                        self.photos = []
-                        }
-                    }
-                    self.refreshFolderTree()
+                    self.handleFolderRemoved(normalizedURL, fallbackSelection: parentURL, panel: panel)
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.presentError("フォルダを削除できませんでした: \(error.localizedDescription)")
+            } catch let trashError {
+                do {
+                    let pendingDeletionFolder = self.pendingDeletionFolder(in: parentURL, deleting: normalizedURL)
+                    if !fm.fileExists(atPath: pendingDeletionFolder.path) {
+                        try fm.createDirectory(at: pendingDeletionFolder, withIntermediateDirectories: false, attributes: nil)
+                    }
+                    let baseDestination = pendingDeletionFolder.appendingPathComponent(normalizedURL.lastPathComponent)
+                    let destinationURL = self.uniqueURL(for: baseDestination, fileManager: fm) { index in
+                        index == 1 ? " deleted" : " deleted \(index)"
+                    }
+                    try fm.moveItem(at: normalizedURL, to: destinationURL)
+                    DispatchQueue.main.async {
+                        self.handleFolderRemoved(normalizedURL, fallbackSelection: parentURL, panel: panel)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.presentError("フォルダを削除予定へ移動できませんでした: \(error.localizedDescription)\n元のエラー: \(trashError.localizedDescription)")
+                    }
                 }
             }
         }
+    }
+    
+    private func pendingDeletionFolder(in parentURL: URL, deleting folderURL: URL) -> URL {
+        let defaultURL = parentURL.appendingPathComponent("削除予定", isDirectory: true)
+        if defaultURL.standardizedFileURL != folderURL.standardizedFileURL {
+            return defaultURL
+        }
+        return parentURL.appendingPathComponent("削除予定_退避", isDirectory: true)
+    }
+    
+    private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
+        if selectedFolderURL(for: panel)?.standardizedFileURL == removedURL {
+            setSelectedFolderURL(fallbackSelection, for: panel)
+        }
+        if let current = currentFolder?.standardizedFileURL {
+            let removedPath = removedURL.path
+            if current.path == removedPath || current.path.hasPrefix(removedPath + "/") {
+                currentFolder = fallbackSelection
+                photos = []
+            }
+        }
+        refreshAllFolderTrees()
+    }
+#else
+    private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
+        if selectedFolderURL?.standardizedFileURL == removedURL {
+            selectedFolderURL = fallbackSelection
+        }
+        if let current = currentFolder?.standardizedFileURL {
+            let removedPath = removedURL.path
+            if current.path == removedPath || current.path.hasPrefix(removedPath + "/") {
+                currentFolder = fallbackSelection
+                photos = []
+            }
+        }
+        refreshFolderTree()
     }
 #endif
 #if os(macOS)
@@ -628,7 +738,7 @@ class PhotoSorterViewModel: ObservableObject {
                 if let current = self.currentFolder?.standardizedFileURL, current == destination {
                     self.loadPhotos(from: destination)
                 } else {
-                    self.refreshFolderTree()
+                    self.refreshAllFolderTrees()
                 }
             }
         }
@@ -747,12 +857,19 @@ class PhotoSorterViewModel: ObservableObject {
         }
     }
     
-    func toggleSelectedPhotoStatus() {
-        guard let selectedID = primarySelectedPhotoID,
-              let photo = photos.first(where: { $0.id == selectedID }) else {
-            return
+    func toggleSelectedPhotoStatus(deferred: Bool = false) {
+        let apply = {
+            guard let selectedID = self.primarySelectedPhotoID,
+                  let photo = self.photos.first(where: { $0.id == selectedID }) else {
+                return
+            }
+            self.toggleStatus(for: photo)
         }
-        toggleStatus(for: photo)
+        if deferred {
+            DispatchQueue.main.async(execute: apply)
+        } else {
+            apply()
+        }
     }
     
     var selectedPhoto: PhotoItem? {
@@ -833,7 +950,7 @@ class PhotoSorterViewModel: ObservableObject {
                 if let current = self.currentFolder {
                     self.loadPhotos(from: current)
                 }
-                self.refreshFolderTree()
+                self.refreshAllFolderTrees()
             }
         }
     }
@@ -888,7 +1005,7 @@ class PhotoSorterViewModel: ObservableObject {
 
         if didCreateDiscardFolder {
             DispatchQueue.main.async {
-                self.refreshFolderTree()
+                self.refreshAllFolderTrees()
             }
         }
         
