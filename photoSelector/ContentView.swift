@@ -523,6 +523,8 @@ struct FolderTreeView: View {
                 localSelection = selectedFolderURL
             } else if let root = folderTree.first?.id {
                 localSelection = root
+            } else if folderTree.isEmpty {
+                localSelection = nil
             }
         }
     }
@@ -1183,7 +1185,18 @@ struct FolderTreeRow: View {
         HStack {
             Image(systemName: item.isFolder ? "folder" : "photo")
             Text(item.name)
-            Spacer()
+            Spacer(minLength: 0)
+            if viewModel.shouldShowEjectVolumeButton(for: panelKind, item: item) {
+                Button {
+                    viewModel.ejectVolumeForFolderPanel(panelKind)
+                } label: {
+                    Image(systemName: "eject")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isActiveSelection ? Color.white.opacity(0.9) : Color.secondary)
+                .help("ボリュームを取り外す")
+            }
         }
         .foregroundStyle(isActiveSelection ? Color.white : Color.primary)
         .padding(.vertical, 2)

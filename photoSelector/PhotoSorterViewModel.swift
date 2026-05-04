@@ -8,6 +8,9 @@
 import SwiftUI
 import Combine
 import ImageIO
+#if os(macOS)
+import AppKit
+#endif
 
 // MARK: - Thumbnail Generator
 class ThumbnailGenerator {
@@ -253,6 +256,64 @@ class PhotoSorterViewModel: ObservableObject {
             secondarySelectedFolderURL = url
         }
         activeFolderPanel = panel
+    }
+    
+    func shouldShowEjectVolumeButton(for panel: FolderPanelKind, item: FileSystemItem) -> Bool {
+        guard let root = rootFolderURL(for: panel) else { return false }
+        guard root == item.id.standardizedFileURL else { return false }
+        return Self.ejectableVolumeMountURL(containing: root) != nil
+    }
+    
+    func ejectVolumeForFolderPanel(_ panel: FolderPanelKind) {
+        guard let root = rootFolderURL(for: panel) else { return }
+        guard let volumeURL = Self.ejectableVolumeMountURL(containing: root) else {
+            errorMessage = "このフォルダは取り外し可能なボリューム上にありません。"
+            showError = true
+            return
+        }
+        do {
+            try NSWorkspace.shared.unmountAndEjectDevice(at: volumeURL)
+            clearFolderPanelAfterEject(for: panel)
+        } catch {
+            errorMessage = "ボリュームの取り外しに失敗しました: \(error.localizedDescription)"
+            showError = true
+        }
+    }
+    
+    private func clearFolderPanelAfterEject(for panel: FolderPanelKind) {
+        let wasActive = (activeFolderPanel == panel)
+        
+        switch panel {
+        case .primary:
+            folderTree = []
+            folderTreeRootURL = nil
+            selectedFolderURL = nil
+        case .secondary:
+            secondaryFolderTree = []
+            secondaryFolderTreeRootURL = nil
+            secondarySelectedFolderURL = nil
+        }
+        
+        guard wasActive else { return }
+        
+        let other: FolderPanelKind = (panel == .primary) ? .secondary : .primary
+        if rootFolderURL(for: other) != nil, let selected = selectedFolderURL(for: other) {
+            activeFolderPanel = other
+            loadPhotos(from: selected)
+        } else {
+            activeFolderPanel = nil
+            photos = []
+            currentFolder = nil
+            clearSelection(deferred: false)
+        }
+    }
+    
+    private static func ejectableVolumeMountURL(containing folderURL: URL) -> URL? {
+        let keys: Set<URLResourceKey> = [.volumeURLKey, .volumeIsRemovableKey, .volumeIsEjectableKey]
+        guard let values = try? folderURL.resourceValues(forKeys: keys) else { return nil }
+        let ejectable = (values.volumeIsRemovable == true) || (values.volumeIsEjectable == true)
+        guard ejectable else { return nil }
+        return values.volume?.standardizedFileURL ?? folderURL.standardizedFileURL
     }
 #endif
     
