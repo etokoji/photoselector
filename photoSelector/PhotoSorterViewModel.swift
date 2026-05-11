@@ -367,7 +367,7 @@ class PhotoSorterViewModel: ObservableObject {
                 sortedURLs = imageFiles.sorted { a, b in
                     let da = (try? a.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture
                     let db = (try? b.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture
-                    return da < db
+                    return (da, a.standardizedFileURL.path) < (db, b.standardizedFileURL.path)
                 }
             case .exifPreferred:
                 sortedURLs = imageFiles.sorted { a, b in
@@ -387,7 +387,7 @@ class PhotoSorterViewModel: ObservableObject {
                     }
                     let da = exifDate(a) ?? ((try? a.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture)
                     let db = exifDate(b) ?? ((try? b.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture)
-                    return da < db
+                    return (da, a.standardizedFileURL.path) < (db, b.standardizedFileURL.path)
                 }
             }
             
@@ -961,7 +961,7 @@ class PhotoSorterViewModel: ObservableObject {
                 da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
                 db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
             }
-            return da < db
+            return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
         }
         DispatchQueue.main.async {
             self.photos.sort(by: comparator)
