@@ -482,27 +482,14 @@ struct FolderTreeView: View {
     @State private var localSelection: URL?
 
     var body: some View {
-        List(folderTree, children: \.children) { item in
-#if os(macOS)
-            FolderTreeRow(item: item,
-                          isSelected: isSelected(item.id),
-                          panelKind: panelKind,
-                          onSelect: {
-                              selectFolder(item.id)
-                          })
-#else
-            HStack {
-                Image(systemName: item.isFolder ? "folder" : "photo")
-                Text(item.name)
-            }
-            .padding(.vertical, 2)
-#endif
-        }
-        .listStyle(SidebarListStyle())
+        treeContent
         // Keep local state and view model in sync without publishing during a view update
         .onAppear {
             // Initialize local selection from model
             localSelection = selectedFolderURL ?? folderTree.first?.id
+            if let url = localSelection {
+                viewModel.expandAncestors(of: url, in: panelKind)
+            }
         }
         .onChange(of: localSelection) { _, newValue in
             // Propagate user-driven selection changes to the view model on the next runloop
@@ -516,11 +503,15 @@ struct FolderTreeView: View {
             if localSelection != newValue {
                 localSelection = newValue
             }
+            if let newValue {
+                viewModel.expandAncestors(of: newValue, in: panelKind)
+            }
         }
         .onChange(of: folderTree) { _, _ in
             // Re-apply selection when the whole tree changes, even if the selected URL value did not.
             if let selectedFolderURL {
                 localSelection = selectedFolderURL
+                viewModel.expandAncestors(of: selectedFolderURL, in: panelKind)
             } else if let root = folderTree.first?.id {
                 localSelection = root
             } else if folderTree.isEmpty {
@@ -529,9 +520,114 @@ struct FolderTreeView: View {
         }
     }
     
+    @ViewBuilder
+    private var treeContent: some View {
+#if os(macOS)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(folderTree) { item in
+                    FolderTreeNode(
+                        item: item,
+                        depth: 0,
+                        selectedFolderURL: $selectedFolderURL,
+                        panelKind: panelKind,
+                        localSelection: $localSelection,
+                        onSelect: selectFolder
+                    )
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+#else
+        List(folderTree, children: \.children) { item in
+            HStack {
+                Image(systemName: item.isFolder ? "folder" : "photo")
+                Text(item.name)
+            }
+            .padding(.vertical, 2)
+        }
+        .listStyle(SidebarListStyle())
+#endif
+    }
+    
     private func selectFolder(_ url: URL) {
         localSelection = url
         viewModel.setSelectedFolderURL(url, for: panelKind)
+    }
+}
+
+#if os(macOS)
+private let folderTreeIndent: CGFloat = 16
+private let folderTreeChevronWidth: CGFloat = 12
+
+struct FolderTreeNode: View {
+    let item: FileSystemItem
+    let depth: Int
+    @Binding var selectedFolderURL: URL?
+    let panelKind: FolderPanelKind
+    @Binding var localSelection: URL?
+    let onSelect: (URL) -> Void
+    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    
+    private var hasChildren: Bool {
+        guard let children = item.children else { return false }
+        return !children.isEmpty
+    }
+    
+    private var isExpanded: Bool {
+        viewModel.isFolderExpanded(item.id, in: panelKind)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 2) {
+                disclosureControl
+                folderRow
+            }
+            .padding(.leading, CGFloat(depth) * folderTreeIndent)
+            
+            if hasChildren && isExpanded {
+                ForEach(item.children ?? []) { child in
+                    FolderTreeNode(
+                        item: child,
+                        depth: depth + 1,
+                        selectedFolderURL: $selectedFolderURL,
+                        panelKind: panelKind,
+                        localSelection: $localSelection,
+                        onSelect: onSelect
+                    )
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var disclosureControl: some View {
+        if hasChildren {
+            Button {
+                viewModel.setFolderExpanded(item.id, expanded: !isExpanded, in: panelKind)
+            } label: {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: folderTreeChevronWidth, height: 16)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Color.clear
+                .frame(width: folderTreeChevronWidth, height: 16)
+        }
+    }
+    
+    private var folderRow: some View {
+        FolderTreeRow(
+            item: item,
+            isSelected: isSelected(item.id),
+            panelKind: panelKind,
+            onSelect: { onSelect(item.id) }
+        )
     }
     
     private func isSelected(_ url: URL) -> Bool {
@@ -539,6 +635,7 @@ struct FolderTreeView: View {
         selectedFolderURL?.standardizedFileURL == url.standardizedFileURL
     }
 }
+#endif
 #if os(macOS)
 extension FolderTreeRow {
     private var isRootFolder: Bool {
@@ -1184,8 +1281,9 @@ struct FolderTreeRow: View {
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
 
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             Image(systemName: item.isFolder ? "folder" : "photo")
+                .frame(width: 16, alignment: .center)
             Text(item.name)
             Spacer(minLength: 0)
             if viewModel.shouldShowEjectVolumeButton(for: panelKind, item: item) {

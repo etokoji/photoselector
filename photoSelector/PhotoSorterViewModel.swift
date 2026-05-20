@@ -134,6 +134,8 @@ class PhotoSorterViewModel: ObservableObject {
     private var secondaryFolderTreeRootURL: URL?
     @Published var activeFolderPanel: FolderPanelKind?
     @Published var targetedFolderURL: URL?
+    @Published var primaryExpandedFolderURLs: Set<URL> = []
+    @Published var secondaryExpandedFolderURLs: Set<URL> = []
     
     // Column counts for keyboard navigation
     @Published var groupAColumns: Int = 2
@@ -180,6 +182,7 @@ class PhotoSorterViewModel: ObservableObject {
         let tree = [FileSystemItem(id: rootURL, name: rootURL.lastPathComponent, children: items, isFolder: true)]
         
         // Initially select the root folder or keep current selection based on flag
+        let normalizedRoot = rootURL.standardizedFileURL
         switch panel {
         case .primary:
             folderTreeRootURL = rootURL
@@ -187,15 +190,28 @@ class PhotoSorterViewModel: ObservableObject {
             if selectedFolderURL == nil || resetSelection {
                 selectedFolderURL = rootURL
             }
+            if resetSelection {
+                primaryExpandedFolderURLs = [normalizedRoot]
+            } else if primaryExpandedFolderURLs.isEmpty {
+                primaryExpandedFolderURLs = [normalizedRoot]
+            }
         case .secondary:
             secondaryFolderTreeRootURL = rootURL
             secondaryFolderTree = tree
             if secondarySelectedFolderURL == nil || resetSelection {
                 secondarySelectedFolderURL = rootURL
             }
+            if resetSelection {
+                secondaryExpandedFolderURLs = [normalizedRoot]
+            } else if secondaryExpandedFolderURLs.isEmpty {
+                secondaryExpandedFolderURLs = [normalizedRoot]
+            }
         }
         if resetSelection {
             activeFolderPanel = panel
+        }
+        if let selected = selectedFolderURL(for: panel) {
+            expandAncestors(of: selected, in: panel)
         }
     }
 
@@ -257,6 +273,56 @@ class PhotoSorterViewModel: ObservableObject {
             secondarySelectedFolderURL = url
         }
         activeFolderPanel = panel
+        expandAncestors(of: url, in: panel)
+    }
+    
+    func expandedFolderURLs(for panel: FolderPanelKind) -> Set<URL> {
+        switch panel {
+        case .primary:
+            return primaryExpandedFolderURLs
+        case .secondary:
+            return secondaryExpandedFolderURLs
+        }
+    }
+    
+    func isFolderExpanded(_ url: URL, in panel: FolderPanelKind) -> Bool {
+        expandedFolderURLs(for: panel).contains(url.standardizedFileURL)
+    }
+    
+    func setFolderExpanded(_ url: URL, expanded: Bool, in panel: FolderPanelKind) {
+        let normalized = url.standardizedFileURL
+        switch panel {
+        case .primary:
+            if expanded {
+                primaryExpandedFolderURLs.insert(normalized)
+            } else {
+                primaryExpandedFolderURLs.remove(normalized)
+            }
+        case .secondary:
+            if expanded {
+                secondaryExpandedFolderURLs.insert(normalized)
+            } else {
+                secondaryExpandedFolderURLs.remove(normalized)
+            }
+        }
+    }
+    
+    func expandAncestors(of url: URL, in panel: FolderPanelKind) {
+        guard let root = rootFolderURL(for: panel)?.standardizedFileURL else { return }
+        let normalized = url.standardizedFileURL
+        var urls = expandedFolderURLs(for: panel)
+        urls.insert(root)
+        var current = normalized.deletingLastPathComponent().standardizedFileURL
+        while current.path.hasPrefix(root.path), current != root {
+            urls.insert(current)
+            current = current.deletingLastPathComponent().standardizedFileURL
+        }
+        switch panel {
+        case .primary:
+            primaryExpandedFolderURLs = urls
+        case .secondary:
+            secondaryExpandedFolderURLs = urls
+        }
     }
     
     func shouldShowEjectVolumeButton(for panel: FolderPanelKind, item: FileSystemItem) -> Bool {
@@ -289,10 +355,12 @@ class PhotoSorterViewModel: ObservableObject {
             folderTree = []
             folderTreeRootURL = nil
             selectedFolderURL = nil
+            primaryExpandedFolderURLs = []
         case .secondary:
             secondaryFolderTree = []
             secondaryFolderTreeRootURL = nil
             secondarySelectedFolderURL = nil
+            secondaryExpandedFolderURLs = []
         }
         
         guard wasActive else { return }
@@ -643,6 +711,7 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.createDirectory(at: newURL, withIntermediateDirectories: false, attributes: nil)
                 DispatchQueue.main.async {
+                    self.setFolderExpanded(normalizedParent, expanded: true, in: panel)
                     self.setSelectedFolderURL(newURL, for: panel)
                     self.refreshFolderTree(for: panel)
                 }
@@ -675,6 +744,8 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.moveItem(at: normalizedURL, to: destinationURL)
                 DispatchQueue.main.async {
+                    self.remapExpandedFolderURLs(from: normalizedURL, to: destinationURL, in: .primary)
+                    self.remapExpandedFolderURLs(from: normalizedURL, to: destinationURL, in: .secondary)
                     if self.selectedFolderURL(for: panel)?.standardizedFileURL == normalizedURL {
                         self.setSelectedFolderURL(destinationURL, for: panel)
                     }
@@ -737,6 +808,8 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
+        removeExpandedFolderURLs(under: removedURL, in: .primary)
+        removeExpandedFolderURLs(under: removedURL, in: .secondary)
         if selectedFolderURL(for: panel)?.standardizedFileURL == removedURL {
             setSelectedFolderURL(fallbackSelection, for: panel)
         }
@@ -748,6 +821,49 @@ class PhotoSorterViewModel: ObservableObject {
             }
         }
         refreshAllFolderTrees()
+    }
+    
+    private func remapExpandedFolderURLs(from sourceURL: URL, to destinationURL: URL, in panel: FolderPanelKind) {
+        switch panel {
+        case .primary:
+            primaryExpandedFolderURLs = remappedURLSet(primaryExpandedFolderURLs, from: sourceURL, to: destinationURL)
+        case .secondary:
+            secondaryExpandedFolderURLs = remappedURLSet(secondaryExpandedFolderURLs, from: sourceURL, to: destinationURL)
+        }
+    }
+    
+    private func removeExpandedFolderURLs(under removedURL: URL, in panel: FolderPanelKind) {
+        let removedPath = removedURL.standardizedFileURL.path
+        func filtered(_ urls: Set<URL>) -> Set<URL> {
+            Set(urls.filter { url in
+                let path = url.standardizedFileURL.path
+                return path != removedPath && !path.hasPrefix(removedPath + "/")
+            })
+        }
+        switch panel {
+        case .primary:
+            primaryExpandedFolderURLs = filtered(primaryExpandedFolderURLs)
+        case .secondary:
+            secondaryExpandedFolderURLs = filtered(secondaryExpandedFolderURLs)
+        }
+    }
+    
+    private func remappedURLSet(_ urls: Set<URL>, from sourceURL: URL, to destinationURL: URL) -> Set<URL> {
+        let srcPath = sourceURL.standardizedFileURL.path
+        let dstPath = destinationURL.standardizedFileURL.path
+        var updated = Set<URL>()
+        for url in urls {
+            let path = url.standardizedFileURL.path
+            if path == srcPath {
+                updated.insert(destinationURL.standardizedFileURL)
+            } else if path.hasPrefix(srcPath + "/") {
+                let relativePath = String(path.dropFirst(srcPath.count))
+                updated.insert(URL(fileURLWithPath: dstPath + relativePath).standardizedFileURL)
+            } else {
+                updated.insert(url.standardizedFileURL)
+            }
+        }
+        return updated
     }
 #else
     private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
@@ -1113,6 +1229,9 @@ class PhotoSorterViewModel: ObservableObject {
         if let newCurrent = newCurrent {
             currentFolder = newCurrent
         }
+        
+        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .primary)
+        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .secondary)
     }
 #endif
     
