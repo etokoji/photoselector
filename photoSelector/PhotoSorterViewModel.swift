@@ -1024,23 +1024,25 @@ class PhotoSorterViewModel: ObservableObject {
             newIndex = max(0, currentIndex - 1)
         case .right:
             newIndex = min(contextIDs.count - 1, currentIndex + 1)
-        case .up:
-            // Calculate approximate row movement
+        case .up, .down:
             let effectiveColumns: Int
             switch selectionContext {
-            case .grid: effectiveColumns = columns
-            case .keep: effectiveColumns = groupAColumns
-            case .discard: effectiveColumns = groupBColumns
+            case .grid: effectiveColumns = max(1, columns)
+            case .keep: effectiveColumns = max(1, groupAColumns)
+            case .discard: effectiveColumns = max(1, groupBColumns)
             }
-            newIndex = max(0, currentIndex - effectiveColumns)
-        case .down:
-            let effectiveColumns: Int
-            switch selectionContext {
-            case .grid: effectiveColumns = columns
-            case .keep: effectiveColumns = groupAColumns
-            case .discard: effectiveColumns = groupBColumns
+            let column = currentIndex % effectiveColumns
+            let row = currentIndex / effectiveColumns
+            if direction == .up {
+                if row > 0 {
+                    newIndex = (row - 1) * effectiveColumns + column
+                }
+            } else {
+                let targetIndex = (row + 1) * effectiveColumns + column
+                if targetIndex < contextIDs.count {
+                    newIndex = targetIndex
+                }
             }
-            newIndex = min(contextIDs.count - 1, currentIndex + effectiveColumns)
         }
         
         if newIndex != currentIndex && newIndex >= 0 && newIndex < contextIDs.count {
