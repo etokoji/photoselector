@@ -133,6 +133,7 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var secondarySelectedFolderURL: URL?
     private var secondaryFolderTreeRootURL: URL?
     @Published var activeFolderPanel: FolderPanelKind?
+    @Published var targetedFolderURL: URL?
     
     // Column counts for keyboard navigation
     @Published var groupAColumns: Int = 2
@@ -784,6 +785,20 @@ class PhotoSorterViewModel: ObservableObject {
             let fm = FileManager.default
             for url in urls {
                 let sourceURL = url.standardizedFileURL
+                
+                // Prevent recursive folder drops
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue {
+                    let destPath = destination.path
+                    let sourcePath = sourceURL.path
+                    if destPath == sourcePath || destPath.hasPrefix(sourcePath + "/") {
+                        DispatchQueue.main.async {
+                            self.presentError("フォルダを自分自身またはそのサブフォルダにコピーすることはできません。")
+                        }
+                        continue
+                    }
+                }
+                
                 let baseDestination = destination.appendingPathComponent(sourceURL.lastPathComponent)
                 let targetURL = self.uniqueCopyURL(for: baseDestination, fileManager: fm)
                 do {
@@ -989,17 +1004,35 @@ class PhotoSorterViewModel: ObservableObject {
         isProcessing = true
         DispatchQueue.global(qos: .userInitiated).async {
             let fileManager = FileManager.default
+            var movedFolders: [(from: URL, to: URL)] = []
             for url in urls {
                 let sourceURL = url.standardizedFileURL
                 var destinationURL = destinationFolder.appendingPathComponent(sourceURL.lastPathComponent)
                 if sourceURL == destinationURL {
                     continue
                 }
+                
+                // Prevent recursive folder drops
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue {
+                    let destPath = destinationFolder.standardizedFileURL.path
+                    let sourcePath = sourceURL.path
+                    if destPath == sourcePath || destPath.hasPrefix(sourcePath + "/") {
+                        DispatchQueue.main.async {
+                            self.presentError("フォルダを自分自身またはそのサブフォルダに移動することはできません。")
+                        }
+                        continue
+                    }
+                }
+                
                 do {
                     if fileManager.fileExists(atPath: destinationURL.path) {
                         destinationURL = self.uniqueMoveURL(for: destinationURL, fileManager: fileManager)
                     }
                     try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                    if isDir.boolValue {
+                        movedFolders.append((from: sourceURL, to: destinationURL))
+                    }
                 } catch {
                     DispatchQueue.main.async {
                         self.presentError("Failed to move \(sourceURL.lastPathComponent): \(error.localizedDescription)")
@@ -1008,11 +1041,77 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
+                
+                // Update selected/current folder URLs if any directories were moved
+                for mapping in movedFolders {
+                    self.updateStoredURLsAfterMove(from: mapping.from, to: mapping.to)
+                }
+                
                 if let current = self.currentFolder {
                     self.loadPhotos(from: current)
                 }
                 self.refreshAllFolderTrees()
             }
+        }
+    }
+    
+    private func isURL(_ url: URL, under rootURL: URL?) -> Bool {
+        guard let root = rootURL?.standardizedFileURL else { return false }
+        let path = url.standardizedFileURL.path
+        let rootPath = root.path
+        return path == rootPath || path.hasPrefix(rootPath + "/")
+    }
+
+    private func updateStoredURLsAfterMove(from sourceURL: URL, to destinationURL: URL) {
+        let srcPath = sourceURL.standardizedFileURL.path
+        let dstPath = destinationURL.standardizedFileURL.path
+        
+        func updatedURL(_ url: URL) -> URL {
+            let path = url.standardizedFileURL.path
+            if path == srcPath {
+                return destinationURL
+            } else if path.hasPrefix(srcPath + "/") {
+                let relativePath = String(path.dropFirst(srcPath.count))
+                let newPath = dstPath + relativePath
+                return URL(fileURLWithPath: newPath)
+            }
+            return url
+        }
+        
+        let newPrimarySelected = selectedFolderURL.map { updatedURL($0) }
+        let newSecondarySelected = secondarySelectedFolderURL.map { updatedURL($0) }
+        let newCurrent = currentFolder.map { updatedURL($0) }
+        
+        let primaryAffected = selectedFolderURL != nil && newPrimarySelected != selectedFolderURL
+        let secondaryAffected = secondarySelectedFolderURL != nil && newSecondarySelected != secondarySelectedFolderURL
+        
+        let isPrimarySource = isURL(sourceURL, under: folderTreeRootURL)
+        let isSecondarySource = isURL(sourceURL, under: secondaryFolderTreeRootURL)
+        let isPrimaryDest = isURL(destinationURL, under: folderTreeRootURL)
+        let isSecondaryDest = isURL(destinationURL, under: secondaryFolderTreeRootURL)
+        
+        if primaryAffected && isPrimarySource && isSecondaryDest {
+            // Dragged selected folder from primary to secondary
+            secondarySelectedFolderURL = newPrimarySelected
+            selectedFolderURL = folderTreeRootURL
+            activeFolderPanel = .secondary
+        } else if secondaryAffected && isSecondarySource && isPrimaryDest {
+            // Dragged selected folder from secondary to primary
+            selectedFolderURL = newSecondarySelected
+            secondarySelectedFolderURL = secondaryFolderTreeRootURL
+            activeFolderPanel = .primary
+        } else {
+            // Move within the same panel, or non-selected folder moved
+            if let newPrimary = newPrimarySelected {
+                selectedFolderURL = newPrimary
+            }
+            if let newSecondary = newSecondarySelected {
+                secondarySelectedFolderURL = newSecondary
+            }
+        }
+        
+        if let newCurrent = newCurrent {
+            currentFolder = newCurrent
         }
     }
 #endif

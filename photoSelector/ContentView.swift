@@ -617,7 +617,6 @@ extension FolderTreeRow {
 private struct FolderDropDelegate: DropDelegate {
     let item: FileSystemItem
     let viewModel: PhotoSorterViewModel
-    @Binding var isTargeted: Bool
     
     func validateDrop(info: DropInfo) -> Bool {
         item.isFolder
@@ -625,12 +624,14 @@ private struct FolderDropDelegate: DropDelegate {
     
     func dropEntered(info: DropInfo) {
         if item.isFolder {
-            isTargeted = true
+            viewModel.targetedFolderURL = item.id
         }
     }
     
     func dropExited(info: DropInfo) {
-        isTargeted = false
+        if viewModel.targetedFolderURL == item.id {
+            viewModel.targetedFolderURL = nil
+        }
     }
     
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -640,7 +641,9 @@ private struct FolderDropDelegate: DropDelegate {
     
     func performDrop(info: DropInfo) -> Bool {
         guard item.isFolder else { return false }
-        isTargeted = false
+        if viewModel.targetedFolderURL == item.id {
+            viewModel.targetedFolderURL = nil
+        }
         let copy = isCopyGesture
         Task {
             let urls = await loadURLs(from: info)
@@ -1179,7 +1182,6 @@ struct FolderTreeRow: View {
     let panelKind: FolderPanelKind
     let onSelect: () -> Void
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
-    @State private var isTargeted = false
 
     var body: some View {
         HStack {
@@ -1208,9 +1210,11 @@ struct FolderTreeRow: View {
         .onTapGesture(perform: onSelect)
         .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
                 delegate: FolderDropDelegate(item: item,
-                                             viewModel: viewModel,
-                                             isTargeted: $isTargeted))
+                                             viewModel: viewModel))
 #if os(macOS)
+        .onDragIf(!isRootFolder) {
+            NSItemProvider(object: item.id.standardizedFileURL as NSURL)
+        }
         .contextMenu {
             Button("新規フォルダ") {
                 createSubfolder()
@@ -1230,6 +1234,10 @@ struct FolderTreeRow: View {
             .disabled(!canDeleteFolder)
         }
 #endif
+    }
+
+    private var isTargeted: Bool {
+        viewModel.targetedFolderURL?.standardizedFileURL == item.id.standardizedFileURL
     }
 
     private var backgroundColor: Color {
@@ -2208,6 +2216,27 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             debugLog("zoomToActualPixels -> \(clamped)")
 #endif
             userHasAdjustedZoom = true
+        }
+    }
+}
+
+// MARK: - View Extensions
+extension View {
+    @ViewBuilder
+    func draggableIf<T: Transferable>(_ condition: Bool, _ payload: @escaping @autoclosure () -> T) -> some View {
+        if condition {
+            self.draggable(payload())
+        } else {
+            self
+        }
+    }
+    
+    @ViewBuilder
+    func onDragIf(_ condition: Bool, _ data: @escaping () -> NSItemProvider) -> some View {
+        if condition {
+            self.onDrag(data)
+        } else {
+            self
         }
     }
 }
