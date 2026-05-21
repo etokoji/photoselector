@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 import ImageIO
 
 struct ContentView: View {
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @StateObject private var viewModel = PhotoSorterViewModel()
     @State private var showImagePreview = false
     @FocusState private var isGridFocused: Bool
     @State private var actualGridWidth: CGFloat = 800
@@ -19,7 +19,10 @@ struct ContentView: View {
     @State private var previewWindowDelegate: PreviewWindowDelegate?
     // Bridge state to avoid publishing during view updates
     @State private var localSortMode: DateSortMode = .fileCreation
-    @AppStorage("FolderPanelsAreVertical") private var folderPanelsAreVertical = false
+    @State private var folderPanelsAreVertical = false
+    @State private var windowID = UUID().uuidString
+    @State private var didApplyLayoutDefaults = false
+    @State private var initialWindowSize: CGSize?
     
     // Monitor for Option key state
     private var isOptionPressed: Bool {
@@ -81,8 +84,11 @@ struct ContentView: View {
                     }) {
                         Label("Clear", systemImage: "xmark.circle")
                     }
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize()
                     .disabled(viewModel.photos.isEmpty)
                 }
+                .frame(minWidth: 230)
                 
                 Spacer()
                 
@@ -92,12 +98,12 @@ struct ContentView: View {
                 Spacer()
                 
                 // Sort mode picker (local state bridged to ViewModel)
-                Picker("Date", selection: $localSortMode) {
+                Picker("Sort Date", selection: $localSortMode) {
                     Text("File").tag(DateSortMode.fileCreation)
                     Text("EXIF").tag(DateSortMode.exifPreferred)
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
+                .frame(minWidth: 200)
                 .help("Sort by file creation date (fast) or EXIF date (slow)")
                 
                 Spacer()
@@ -123,13 +129,14 @@ struct ContentView: View {
                         primarySelectedFolderURL: $viewModel.selectedFolderURL,
                         secondaryFolderTree: viewModel.secondaryFolderTree,
                         secondarySelectedFolderURL: $viewModel.secondarySelectedFolderURL,
-                        isVertical: folderPanelsAreVertical
+                        isVertical: folderPanelsAreVertical,
+                        windowID: windowID
                     ),
                     bottom: ExifInfoPanel()
                         .frame(minWidth: 150, maxHeight: .infinity),
                     minTop: folderPanelsAreVertical ? 240 : 180,
                     minBottom: 140,
-                    splitPositionKey: "LeftPanelVerticalSplitPosition"
+                    splitPositionKey: "\(windowID)_LeftPanelVerticalSplitPosition"
                 ),
                 right: SplitViewRepresentable(
                     left: PhotoGridView(
@@ -174,16 +181,17 @@ struct ContentView: View {
                             viewModel.setStatusForSelection(status)
                         },
                         activeContext: viewModel.selectionContext,
-                        onOpenPreview: { showImagePreview = true }
+                        onOpenPreview: { showImagePreview = true },
+                        windowID: windowID
                     )
                     .frame(minWidth: 200),
                     minLeft: 400,
                     minRight: 200,
-                    splitPositionKey: "ContentSplitPosition"
+                    splitPositionKey: "\(windowID)_ContentSplitPosition"
                 ),
                 minLeft: 300,
                 minRight: 600,
-                splitPositionKey: "MainSplitPosition"
+                splitPositionKey: "\(windowID)_MainSplitPosition"
             )
             .frame(minWidth: 800)
             .onKeyPress(.upArrow) {
@@ -332,7 +340,37 @@ struct ContentView: View {
                 openPreviewWindow(for: selectedPhoto)
             }
         }
+        .environmentObject(viewModel)
+        .focusedSceneObject(viewModel)
+#if os(macOS)
+        .background(WindowTitleSetter(title: viewModel.windowTitle))
+        .background(WindowInitialSizeSetter(size: initialWindowSize))
+        .focusedValue(\.saveWindowLayoutDefaults) {
+            WindowLayoutDefaults.saveCurrentLayout(
+                windowID: windowID,
+                folderPanelsAreVertical: folderPanelsAreVertical,
+                thumbnailSize: viewModel.thumbnailSize,
+                sortMode: viewModel.sortMode,
+                windowSize: WindowLayoutDefaults.mainWindowContentSize(from: NSApp.keyWindow)
+            )
+        }
+        .onAppear {
+            applySavedLayoutDefaultsIfNeeded()
+        }
+#endif
     }
+    
+#if os(macOS)
+    private func applySavedLayoutDefaultsIfNeeded() {
+        guard !didApplyLayoutDefaults else { return }
+        didApplyLayoutDefaults = true
+        guard let settings = WindowLayoutDefaults.applyLayout(to: windowID) else { return }
+        folderPanelsAreVertical = settings.folderPanelsAreVertical
+        viewModel.applyWindowLayoutSettings(settings)
+        localSortMode = settings.sortMode
+        initialWindowSize = settings.windowSize
+    }
+#endif
     
     func selectFolder(for panelKind: FolderPanelKind) {
         let panel = NSOpenPanel()
@@ -397,6 +435,7 @@ struct FolderPanelsContainer: View {
     let secondaryFolderTree: [FileSystemItem]
     @Binding var secondarySelectedFolderURL: URL?
     let isVertical: Bool
+    let windowID: String
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
 
     var body: some View {
@@ -408,7 +447,7 @@ struct FolderPanelsContainer: View {
                     .frame(minHeight: 120),
                 minTop: 120,
                 minBottom: 120,
-                splitPositionKey: "FolderPanelsVerticalSplitPosition"
+                splitPositionKey: "\(windowID)_FolderPanelsVerticalSplitPosition"
             )
         } else {
             SplitViewRepresentable(
@@ -418,7 +457,7 @@ struct FolderPanelsContainer: View {
                     .frame(minWidth: 150, idealWidth: 250),
                 minLeft: 150,
                 minRight: 150,
-                splitPositionKey: "FolderPanelsSplitPosition"
+                splitPositionKey: "\(windowID)_FolderPanelsSplitPosition"
             )
         }
     }
@@ -1041,7 +1080,8 @@ struct RightSidePanel: View {
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var activeContext: SelectionContext = .grid
     let onOpenPreview: () -> Void
-    
+    let windowID: String
+
     var body: some View {
 #if os(macOS)
         VerticalSplitViewRepresentable(
@@ -1065,11 +1105,11 @@ struct RightSidePanel: View {
                 ),
                 minLeft: 100,
                 minRight: 100,
-                splitPositionKey: "KeepDiscardSplitPosition"
+                splitPositionKey: "\(windowID)_KeepDiscardSplitPosition"
             ),
             minTop: 200,
             minBottom: 200,
-            splitPositionKey: "RightPanelVerticalSplitPosition"
+            splitPositionKey: "\(windowID)_RightPanelVerticalSplitPosition"
         )
 #else
         VStack(spacing: 0) {
@@ -2031,7 +2071,6 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
 
 #Preview {
     ContentView()
-        .environmentObject(PhotoSorterViewModel())
 }
 
 // MARK: - Centering Clip View
@@ -2319,6 +2358,81 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 }
 
 // MARK: - View Extensions
+#if os(macOS)
+private struct WindowTitleSetter: NSViewRepresentable {
+    let title: String
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        updateTitle(for: view)
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        updateTitle(for: nsView)
+    }
+    
+    private func updateTitle(for view: NSView) {
+        DispatchQueue.main.async {
+            view.window?.title = title
+        }
+    }
+}
+
+private struct WindowInitialSizeSetter: NSViewRepresentable {
+    let size: CGSize?
+    
+    func makeNSView(context: Context) -> WindowSizeAnchorView {
+        let view = WindowSizeAnchorView()
+        view.targetSize = size
+        return view
+    }
+    
+    func updateNSView(_ nsView: WindowSizeAnchorView, context: Context) {
+        nsView.targetSize = size
+        nsView.applySizeIfNeeded()
+        DispatchQueue.main.async {
+            nsView.applySizeIfNeeded()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            nsView.applySizeIfNeeded()
+        }
+    }
+}
+
+private final class WindowSizeAnchorView: NSView {
+    var targetSize: CGSize?
+    var didApply = false
+    
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applySizeIfNeeded()
+        DispatchQueue.main.async {
+            self.applySizeIfNeeded()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            self.applySizeIfNeeded()
+        }
+    }
+    
+    func applySizeIfNeeded() {
+        guard !didApply,
+              let window,
+              let targetSize,
+              targetSize.width > 0,
+              targetSize.height > 0
+        else { return }
+        
+        window.setContentSize(targetSize)
+        let appliedSize = window.contentLayoutRect.size
+        if abs(appliedSize.width - targetSize.width) <= 2,
+           abs(appliedSize.height - targetSize.height) <= 2 {
+            didApply = true
+        }
+    }
+}
+#endif
+
 extension View {
     @ViewBuilder
     func draggableIf<T: Transferable>(_ condition: Bool, _ payload: @escaping @autoclosure () -> T) -> some View {

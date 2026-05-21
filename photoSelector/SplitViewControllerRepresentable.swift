@@ -16,10 +16,17 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
         var splitView: NSSplitView?
         var hasRestored = false
         var splitPositionKey: String = ""
+        var forcePersistObserver: NSObjectProtocol?
         private var saveTimer: Timer?
         private var lastUserResizeAt: Date?
         private let tolerance: CGFloat = 1.0
         private let maxRestoreAttempts = 5
+
+        deinit {
+            if let forcePersistObserver {
+                NotificationCenter.default.removeObserver(forcePersistObserver)
+            }
+        }
 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             guard let splitView = notification.object as? NSSplitView else { return }
@@ -32,8 +39,8 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
                 return
             }
 
-            // Only treat changes during live resize (divider drag / window resize) as user intent.
-            if splitView.inLiveResize || splitView.window?.inLiveResize == true {
+            // Only save when the user drags a split divider, not when the window resizes.
+            if splitView.inLiveResize {
                 lastUserResizeAt = Date()
 
                 // Debounce save operation (short delay to avoid excessive writes during drag)
@@ -46,9 +53,7 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
         }
         
         private func restorePosition(splitView: NSSplitView) {
-            if !splitPositionKey.isEmpty,
-               let savedPosition = UserDefaults.standard.object(forKey: splitPositionKey) as? CGFloat,
-               savedPosition > 0 {
+            if let savedPosition = WindowLayoutDefaults.resolvedSplitPosition(forKey: splitPositionKey) {
                 
                 // Check if frame is ready
                 if splitView.frame.width > savedPosition {
@@ -73,14 +78,14 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
             }
         }
         
-        private func savePosition(splitView: NSSplitView) {
+        private func savePosition(splitView: NSSplitView, force: Bool = false) {
             guard !self.splitPositionKey.isEmpty,
                   let leftView = splitView.arrangedSubviews.first
             else { return }
 
             // Prevent programmatic layout changes from overwriting persisted values.
             // Allow saving only shortly after a live resize interaction.
-            if let last = lastUserResizeAt, Date().timeIntervalSince(last) > 2.0 {
+            if !force, let last = lastUserResizeAt, Date().timeIntervalSince(last) > 2.0 {
                 return
             }
 
@@ -91,6 +96,11 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
                 UserDefaults.standard.set(position, forKey: self.splitPositionKey)
                 print("[\(self.splitPositionKey)] Divider move completed. Final width: \(position)")
             }
+        }
+
+        func forcePersistPosition() {
+            guard let splitView else { return }
+            savePosition(splitView: splitView, force: true)
         }
 
         private func applyDividerPosition(_ target: CGFloat, in splitView: NSSplitView, attempt: Int = 0) {
@@ -117,6 +127,13 @@ struct SplitViewRepresentable<Left: View, Right: View>: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         let coordinator = Coordinator()
         coordinator.splitPositionKey = splitPositionKey
+        coordinator.forcePersistObserver = NotificationCenter.default.addObserver(
+            forName: .forcePersistSplitPositions,
+            object: nil,
+            queue: .main
+        ) { [weak coordinator] _ in
+            coordinator?.forcePersistPosition()
+        }
         return coordinator
     }
 
@@ -184,10 +201,17 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
         var splitView: NSSplitView?
         var hasRestored = false
         var splitPositionKey: String = ""
+        var forcePersistObserver: NSObjectProtocol?
         private var saveTimer: Timer?
         private var lastUserResizeAt: Date?
         private let tolerance: CGFloat = 1.0
         private let maxRestoreAttempts = 5
+
+        deinit {
+            if let forcePersistObserver {
+                NotificationCenter.default.removeObserver(forcePersistObserver)
+            }
+        }
 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             guard let splitView = notification.object as? NSSplitView else { return }
@@ -200,7 +224,7 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
                 return
             }
 
-            if splitView.inLiveResize || splitView.window?.inLiveResize == true {
+            if splitView.inLiveResize {
                 lastUserResizeAt = Date()
 
                 // Debounce save operation (short delay to avoid excessive writes during drag)
@@ -213,9 +237,7 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
         }
         
         private func restorePosition(splitView: NSSplitView) {
-            if !splitPositionKey.isEmpty,
-               let savedPosition = UserDefaults.standard.object(forKey: splitPositionKey) as? CGFloat,
-               savedPosition > 0 {
+            if let savedPosition = WindowLayoutDefaults.resolvedSplitPosition(forKey: splitPositionKey) {
                 
                 // Check if frame is ready
                 if splitView.frame.height > savedPosition {
@@ -240,12 +262,12 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
             }
         }
         
-        private func savePosition(splitView: NSSplitView) {
+        private func savePosition(splitView: NSSplitView, force: Bool = false) {
             guard !self.splitPositionKey.isEmpty,
                   let topView = splitView.arrangedSubviews.first
             else { return }
 
-            if let last = lastUserResizeAt, Date().timeIntervalSince(last) > 2.0 {
+            if !force, let last = lastUserResizeAt, Date().timeIntervalSince(last) > 2.0 {
                 return
             }
 
@@ -256,6 +278,11 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
                 UserDefaults.standard.set(position, forKey: self.splitPositionKey)
                 print("[\(self.splitPositionKey)] Divider move completed. Final height: \(position)")
             }
+        }
+
+        func forcePersistPosition() {
+            guard let splitView else { return }
+            savePosition(splitView: splitView, force: true)
         }
 
         private func applyDividerPosition(_ target: CGFloat, in splitView: NSSplitView, attempt: Int = 0) {
@@ -282,6 +309,13 @@ struct VerticalSplitViewRepresentable<Top: View, Bottom: View>: NSViewRepresenta
     func makeCoordinator() -> Coordinator {
         let coordinator = Coordinator()
         coordinator.splitPositionKey = splitPositionKey
+        coordinator.forcePersistObserver = NotificationCenter.default.addObserver(
+            forName: .forcePersistSplitPositions,
+            object: nil,
+            queue: .main
+        ) { [weak coordinator] _ in
+            coordinator?.forcePersistPosition()
+        }
         return coordinator
     }
 

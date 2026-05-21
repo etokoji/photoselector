@@ -103,20 +103,12 @@ enum FolderPanelKind: Equatable {
 
 class PhotoSorterViewModel: ObservableObject {
     @Published var photos: [PhotoItem] = []
-    @Published var sortMode: DateSortMode {
-        didSet {
-            UserDefaults.standard.set(sortMode.rawValue, forKey: "DateSortMode")
-        }
-    }
+    @Published var sortMode: DateSortMode = .fileCreation
     @Published var currentFolder: URL?
     @Published var isProcessing: Bool = false
     @Published var errorMessage: String?
     @Published var showError: Bool = false
-    @Published var thumbnailSize: Double {
-        didSet {
-            UserDefaults.standard.set(thumbnailSize, forKey: "ThumbnailSize")
-        }
-    }
+    @Published var thumbnailSize: Double = 150
     // Selection
     // - primarySelectedPhotoID: the focused item used for preview + keyboard actions
     // - selectedPhotoIDs: supports multi-selection via mouse (cmd/shift)
@@ -141,16 +133,12 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var groupAColumns: Int = 2
     @Published var groupBColumns: Int = 2
     
-    init() {
-        // Restore saved thumbnail size or use default
-        let savedSize = UserDefaults.standard.double(forKey: "ThumbnailSize")
-        self.thumbnailSize = savedSize > 0 ? savedSize : 150
-        if let raw = UserDefaults.standard.string(forKey: "DateSortMode"), let m = DateSortMode(rawValue: raw) {
-            self.sortMode = m
-        } else {
-            self.sortMode = .fileCreation // default: EXIFなし
-        }
+    func applyWindowLayoutSettings(_ settings: WindowLayoutSettings) {
+        thumbnailSize = settings.thumbnailSize
+        sortMode = settings.sortMode
+        resortPhotos()
     }
+    
     
     // Scan the root folder and build the folder tree
     func buildFolderTree(from rootURL: URL, in panel: FolderPanelKind = .primary, resetSelection: Bool = true) {
@@ -253,6 +241,22 @@ class PhotoSorterViewModel: ObservableObject {
             return volumeName
         }
         let displayName = fm.displayName(atPath: root.path)
+        return displayName.isEmpty ? root.lastPathComponent : displayName
+    }
+    
+    var windowTitle: String {
+        let primary = rootFolderTitleName(for: .primary).map { "[\($0)]" }
+        let secondary = rootFolderTitleName(for: .secondary).map { "[\($0)]" }
+        let parts = [primary, secondary].compactMap { $0 }
+        if parts.isEmpty {
+            return "photoSelector"
+        }
+        return parts.joined(separator: "-")
+    }
+    
+    private func rootFolderTitleName(for panel: FolderPanelKind) -> String? {
+        guard let root = rootFolderURL(for: panel) else { return nil }
+        let displayName = FileManager.default.displayName(atPath: root.path)
         return displayName.isEmpty ? root.lastPathComponent : displayName
     }
     

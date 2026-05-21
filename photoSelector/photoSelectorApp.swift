@@ -9,49 +9,57 @@ import SwiftUI
 
 @main
 struct photoSelectorApp: App {
-    @StateObject private var viewModel = PhotoSorterViewModel()
+    @FocusedObject private var viewModel: PhotoSorterViewModel?
+    @FocusedValue(\.saveWindowLayoutDefaults) private var saveWindowLayoutDefaults
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(viewModel)
         }
-        .commands {
-            CommandMenu("仕分け") {
-                Button("採用にする") {
-                    viewModel.setStatusForSelection(.groupA)
-                }
-                .keyboardShortcut("1", modifiers: [.command])
-                .disabled(!viewModel.hasSelection)
-
-                Button("没にする") {
-                    viewModel.setStatusForSelection(.groupB)
-                }
-                .keyboardShortcut("2", modifiers: [.command])
-                .disabled(!viewModel.hasSelection)
-
-                Divider()
-
-                Button("未分類に戻す") {
-                    viewModel.setStatusForSelection(.unknown)
-                }
-                .keyboardShortcut("0", modifiers: [.command])
-                .disabled(!viewModel.hasSelection)
-                
-                Divider()
-                
-                Button("全選択") {
-                    viewModel.selectAllCurrentContext()
-                }
-                .keyboardShortcut("a", modifiers: [.command])
-                .disabled(!viewModel.hasSelectableItemsInCurrentContext)
-
-                Button("選択解除") {
-                    viewModel.clearSelection()
-                }
-                .keyboardShortcut("d", modifiers: [.command])
-                .disabled(!viewModel.hasSelection)
+        .commands { appCommands }
+    }
+    
+    @CommandsBuilder
+    private var appCommands: some Commands {
+        CommandGroup(after: .windowArrangement) {
+            Button("現在の設定とレイアウトをデフォルトにする") {
+                saveWindowLayoutDefaults?()
             }
+        }
+        CommandMenu("仕分け") {
+            Button("採用にする") {
+                viewModel?.setStatusForSelection(.groupA)
+            }
+            .keyboardShortcut("1", modifiers: [.command])
+            .disabled(!(viewModel?.hasSelection ?? false))
+
+            Button("没にする") {
+                viewModel?.setStatusForSelection(.groupB)
+            }
+            .keyboardShortcut("2", modifiers: [.command])
+            .disabled(!(viewModel?.hasSelection ?? false))
+
+            Divider()
+
+            Button("未分類に戻す") {
+                viewModel?.setStatusForSelection(.unknown)
+            }
+            .keyboardShortcut("0", modifiers: [.command])
+            .disabled(!(viewModel?.hasSelection ?? false))
+
+            Divider()
+
+            Button("全選択") {
+                viewModel?.selectAllCurrentContext()
+            }
+            .keyboardShortcut("a", modifiers: [.command])
+            .disabled(!(viewModel?.hasSelectableItemsInCurrentContext ?? false))
+
+            Button("選択解除") {
+                viewModel?.clearSelection()
+            }
+            .keyboardShortcut("d", modifiers: [.command])
+            .disabled(!(viewModel?.hasSelection ?? false))
         }
     }
 }
