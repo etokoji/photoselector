@@ -314,11 +314,11 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             case .changed:
                 guard let startOrigin = panStartOrigin else { return }
                 let translation = gesture.translation(in: scrollView)
-                // X: drag right → origin decreases (non-flipped X same as screen)
-                // Y: drag down → translation.y negative (AppKit Y-up) → origin decreases (sees lower content)
+                // Divide by magnification to convert screen pixels → document coordinates
+                let mag = scrollView.magnification
                 let newOrigin = NSPoint(
-                    x: startOrigin.x - translation.x,
-                    y: startOrigin.y + translation.y
+                    x: startOrigin.x - translation.x / mag,
+                    y: startOrigin.y + translation.y / mag
                 )
                 scrollView.contentView.scroll(to: newOrigin)
                 scrollView.reflectScrolledClipView(scrollView.contentView)
