@@ -6,9 +6,22 @@
 //
 
 import SwiftUI
+import AppKit
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let alert = NSAlert()
+        alert.messageText = "photoSelectorを終了しますか？"
+        alert.addButton(withTitle: "終了")
+        alert.addButton(withTitle: "キャンセル")
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
 
 @main
 struct photoSelectorApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @FocusedObject private var viewModel: PhotoSorterViewModel?
     @FocusedValue(\.saveWindowLayoutDefaults) private var saveWindowLayoutDefaults
 
