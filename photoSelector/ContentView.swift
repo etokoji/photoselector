@@ -1264,7 +1264,9 @@ private final class ExifMetadataProvider {
             if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
                 append("DateTimeOriginal", value: exif[kCGImagePropertyExifDateTimeOriginal], to: &list)
                 append("CreateDate", value: exif[kCGImagePropertyExifDateTimeDigitized], to: &list)
-                append("ExposureTime", value: exif[kCGImagePropertyExifExposureTime], to: &list)
+                if let et = exif[kCGImagePropertyExifExposureTime] as? Double {
+                    list.append(("ExposureTime", Self.exposureTimeString(et)))
+                }
                 append("FNumber", value: exif[kCGImagePropertyExifFNumber], to: &list)
                 append("ISO", value: exif[kCGImagePropertyExifISOSpeedRatings], to: &list)
                 append("FocalLength", value: exif[kCGImagePropertyExifFocalLength], to: &list)
@@ -1293,6 +1295,14 @@ private final class ExifMetadataProvider {
     private func append(_ label: String, value: Any?, to list: inout [(String, String)]) {
         guard let stringValue = Self.string(from: value) else { return }
         list.append((label, stringValue))
+    }
+
+    private static func exposureTimeString(_ seconds: Double) -> String {
+        if seconds >= 1 {
+            return String(format: seconds.truncatingRemainder(dividingBy: 1) == 0 ? "%.0fs" : "%.1fs", seconds)
+        }
+        let denominator = Int((1.0 / seconds).rounded())
+        return "1/\(denominator)"
     }
 
     private static func string(from value: Any?) -> String? {
