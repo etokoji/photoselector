@@ -12,6 +12,15 @@ struct photoSelectorApp: App {
     @FocusedObject private var viewModel: PhotoSorterViewModel?
     @FocusedValue(\.saveWindowLayoutDefaults) private var saveWindowLayoutDefaults
 
+    init() {
+        let tmp = FileManager.default.temporaryDirectory
+        if let files = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
