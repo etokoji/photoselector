@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = "photoSelectorを終了しますか？"
         alert.addButton(withTitle: "終了")
         alert.addButton(withTitle: "キャンセル")
+        alert.buttons[1].keyEquivalent = "\u{1b}"
         alert.alertStyle = .warning
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
     }
