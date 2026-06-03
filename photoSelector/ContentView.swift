@@ -1437,35 +1437,13 @@ struct SelectedPhotoPreview: View {
             // Preview Content
             if let photo = photo {
                 GeometryReader { geometry in
-                    AsyncImage(url: photo.url) { phase in
-                        switch phase {
-                        case .empty:
-                            Rectangle()
-                                .fill(Color.gray.opacity(0.2))
-                                .overlay(ProgressView())
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: geometry.size.width, height: geometry.size.height)
-                        case .failure:
-                            VStack {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .font(.largeTitle)
-                                    .foregroundStyle(.secondary)
-                                Text("Failed to load")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        @unknown default:
-                            EmptyView()
+                    PreviewImageView(url: photo.url)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            onOpenPreview?()
                         }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        onOpenPreview?()
-                    }
                 }
                 
                 // Filename and date at bottom
@@ -1526,6 +1504,63 @@ struct SelectedPhotoPreview: View {
                 .frame(maxWidth: .infinity)
             }
         }
+    }
+}
+
+private struct PreviewImageView: View {
+    let url: URL
+    @State private var image: NSImage?
+    @State private var isLoading = false
+    @State private var didFail = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else if isLoading {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.2))
+                    .overlay(ProgressView())
+            } else if didFail {
+                VStack {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text("Failed to load")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.2))
+            }
+        }
+        .task(id: url) {
+            await loadImage()
+        }
+    }
+
+    @MainActor
+    private func loadImage() async {
+        image = nil
+        didFail = false
+        isLoading = true
+
+        let loadedImage = await Task.detached(priority: .userInitiated) {
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+                    return nil as NSImage?
+                }
+                return NSImage(data: data)
+            }
+        }.value
+
+        guard !Task.isCancelled else { return }
+        image = loadedImage
+        didFail = loadedImage == nil
+        isLoading = false
     }
 }
 

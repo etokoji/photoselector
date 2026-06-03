@@ -61,3 +61,6 @@ playground.xcworkspace
 # Other
 .venv/
 node_modules/
+
+# Claude
+.claude/
