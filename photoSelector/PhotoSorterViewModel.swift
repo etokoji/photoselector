@@ -1073,8 +1073,7 @@ class PhotoSorterViewModel: ObservableObject {
             return
         }
 
-        NSWorkspace.shared.recycle(trashPairs.map { $0.url }) { [weak self] trashedItems, _ in
-            guard let self else { return }
+        NSWorkspace.shared.recycle(trashPairs.map { $0.url }) { trashedItems, _ in
             let fm = FileManager.default
             let trashMap = Dictionary(uniqueKeysWithValues:
                 trashedItems.map { ($0.key.standardizedFileURL, $0.value) })
@@ -1520,9 +1519,9 @@ class PhotoSorterViewModel: ObservableObject {
         guard !itemsToMove.isEmpty else { return }
         
         isProcessing = true
-        let fileManager = FileManager.default
         
         DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
             var destinationCache: [URL: URL] = [:]
             var movedIDs: Set<UUID> = []
             var didCreateDiscardFolder = false
