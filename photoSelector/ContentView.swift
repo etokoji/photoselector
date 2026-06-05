@@ -1336,6 +1336,17 @@ struct FolderTreeRow: View {
                 .frame(width: 16, alignment: .center)
             Text(item.name)
             Spacer(minLength: 0)
+            if viewModel.rootFolderURL(for: panelKind)?.standardizedFileURL == item.id.standardizedFileURL {
+                Button {
+                    viewModel.buildFolderTree(from: item.id, in: panelKind, resetSelection: false)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isActiveSelection ? Color.white.opacity(0.9) : Color.secondary)
+                .help("フォルダツリーを再読み込み")
+            }
             if viewModel.shouldShowEjectVolumeButton(for: panelKind, item: item) {
                 Button {
                     viewModel.ejectVolumeForFolderPanel(panelKind)
