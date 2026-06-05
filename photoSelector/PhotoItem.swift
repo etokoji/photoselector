@@ -27,6 +27,16 @@ struct PhotoItem: Identifiable, Hashable {
     var filename: String {
         return url.lastPathComponent
     }
+
+    var formattedFileSize: String? {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard let size = attributes[.size] as? NSNumber else { return nil }
+            return ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file)
+        } catch {
+            return nil
+        }
+    }
     
     // Fast: file system creation date
     var fileCreationDate: Date? {

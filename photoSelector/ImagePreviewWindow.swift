@@ -25,6 +25,12 @@ struct ImagePreviewWindowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
 
+                    if let fileSize = photo.formattedFileSize {
+                        Text(fileSize)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
                     if let date = viewModel.displayedDate(for: photo) {
                         Text("(\(formatDate(date)))")
                             .font(.caption2)
