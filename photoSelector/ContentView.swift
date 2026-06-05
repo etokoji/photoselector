@@ -92,7 +92,7 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                Text("\(viewModel.photos.count) Photos")
+                Text("\(viewModel.currentFolderPhotos.count) Photos")
                     .foregroundStyle(.secondary)
                 
                 Spacer()
@@ -140,7 +140,7 @@ struct ContentView: View {
                 ),
                 right: SplitViewRepresentable(
                     left: PhotoGridView(
-                        photos: viewModel.photos,
+                        photos: viewModel.currentFolderPhotos,
                         columns: columns,
                         thumbnailSize: viewModel.thumbnailSize,
                         primarySelectedPhotoID: $viewModel.primarySelectedPhotoID,

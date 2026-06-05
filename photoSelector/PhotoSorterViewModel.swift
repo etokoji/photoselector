@@ -144,6 +144,16 @@ class PhotoSorterViewModel: ObservableObject {
     func buildFolderTree(from rootURL: URL, in panel: FolderPanelKind = .primary, resetSelection: Bool = true) {
         let fileManager = FileManager.default
         var items: [FileSystemItem] = []
+        let previousRootURL: URL?
+        let otherPanelRootURL: URL?
+        switch panel {
+        case .primary:
+            previousRootURL = folderTreeRootURL?.standardizedFileURL
+            otherPanelRootURL = secondaryFolderTreeRootURL?.standardizedFileURL
+        case .secondary:
+            previousRootURL = secondaryFolderTreeRootURL?.standardizedFileURL
+            otherPanelRootURL = folderTreeRootURL?.standardizedFileURL
+        }
         
         do {
             let contents = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: .skipsHiddenFiles)
@@ -197,6 +207,12 @@ class PhotoSorterViewModel: ObservableObject {
         }
         if resetSelection {
             activeFolderPanel = panel
+        }
+        if resetSelection,
+           let previousRootURL,
+           previousRootURL != normalizedRoot {
+            prunePhotosAfterTopFolderChange(removedRoot: previousRootURL,
+                                            preservedRoots: [normalizedRoot, otherPanelRootURL].compactMap { $0 })
         }
         if let selected = selectedFolderURL(for: panel) {
             expandAncestors(of: selected, in: panel)
@@ -416,16 +432,46 @@ class PhotoSorterViewModel: ObservableObject {
         return nil
     }
     
+    private func prunePhotosAfterTopFolderChange(removedRoot: URL, preservedRoots: [URL]) {
+        func isUnder(_ url: URL, root: URL) -> Bool {
+            let normalizedURL = url.standardizedFileURL
+            let normalizedRoot = root.standardizedFileURL
+            let path = normalizedURL.path
+            let rootPath = normalizedRoot.path
+            return path == rootPath || path.hasPrefix(rootPath + "/")
+        }
+        
+        let previousPrimaryID = primarySelectedPhotoID
+        let previousSelectedIDs = selectedPhotoIDs
+        
+        photos.removeAll { photo in
+            guard isUnder(photo.url, root: removedRoot) else { return false }
+            return !preservedRoots.contains(where: { isUnder(photo.url, root: $0) })
+        }
+        
+        if let currentFolder,
+           isUnder(currentFolder, root: removedRoot),
+           !preservedRoots.contains(where: { isUnder(currentFolder, root: $0) }) {
+            self.currentFolder = nil
+        }
+        
+        reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                           previousSelectedIDs: previousSelectedIDs)
+    }
+    
     // Load photos from a selected folder
     func loadPhotos(from folderURL: URL) {
-        self.currentFolder = folderURL
-        self.photos = []
+        let normalizedFolderURL = folderURL.standardizedFileURL
+        let previousCurrentFolder = self.currentFolder?.standardizedFileURL
+        self.currentFolder = normalizedFolderURL
         
         let fileManager = FileManager.default
         let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
         
         do {
-            let fileURLs = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: [.creationDateKey], options: options)
+            let fileURLs = try fileManager.contentsOfDirectory(at: normalizedFolderURL,
+                                                               includingPropertiesForKeys: [.creationDateKey],
+                                                               options: options)
             
             let imageExtensions = ["jpg", "jpeg", "png", "heic", "gif", "tiff"]
             
@@ -467,23 +513,87 @@ class PhotoSorterViewModel: ObservableObject {
             let items = sortedURLs.map { PhotoItem(url: $0) }
             
             DispatchQueue.main.async {
-                self.photos = items
-                // Defer selection and context to the next runloop tick to avoid publishing during initial view updates
-                if let first = self.photos.first?.id {
-                    DispatchQueue.main.async {
-                        self.selectSingle(first, deferred: false)
-                        self.selectionContext = .grid
+                let previousPrimaryID = self.primarySelectedPhotoID
+                let previousSelectedIDs = self.selectedPhotoIDs
+                let existingByURL = Dictionary(uniqueKeysWithValues: self.photos.map { ($0.url.standardizedFileURL, $0) })
+                
+                let retainedPhotos = self.photos.filter { existing in
+                    existing.url.deletingLastPathComponent().standardizedFileURL != normalizedFolderURL
+                }
+                let updatedFolderPhotos = items.map { item -> PhotoItem in
+                    let key = item.url.standardizedFileURL
+                    return existingByURL[key] ?? item
+                }
+                
+                self.photos = retainedPhotos + updatedFolderPhotos
+                
+                let didSwitchFolder = previousCurrentFolder != normalizedFolderURL
+                if didSwitchFolder {
+                    if let firstPhotoInSelectedFolder = self.currentFolderPhotos.first?.id {
+                        self.selectSingle(firstPhotoInSelectedFolder, deferred: false)
+                    } else {
+                        self.clearSelection(deferred: false)
                     }
+                    self.selectionContext = .grid
                 } else {
-                    self.clearSelection(deferred: true)
-                    DispatchQueue.main.async {
-                        self.selectionContext = .grid
-                    }
+                    self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                                            previousSelectedIDs: previousSelectedIDs)
                 }
             }
         } catch {
             self.errorMessage = "Failed to load photos: \(error.localizedDescription)"
             self.showError = true
+        }
+    }
+    
+    private func sortedPhotos(_ photos: [PhotoItem]) -> [PhotoItem] {
+        photos.sorted { a, b in
+            let da: Date
+            let db: Date
+            switch sortMode {
+            case .fileCreation:
+                da = a.fileCreationDate ?? .distantFuture
+                db = b.fileCreationDate ?? .distantFuture
+            case .exifPreferred:
+                da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
+                db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
+            }
+            return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
+        }
+    }
+    
+    private func reconcileSelectionAfterPhotoUpdate(previousPrimaryID: UUID?,
+                                                    previousSelectedIDs: Set<UUID>) {
+        let contextIDs = selectableIDs(for: selectionContext)
+        let validContextIDs = Set(contextIDs)
+        var retainedSelection = previousSelectedIDs.intersection(validContextIDs)
+        
+        if let previousPrimaryID, validContextIDs.contains(previousPrimaryID) {
+            if retainedSelection.isEmpty {
+                retainedSelection = [previousPrimaryID]
+            }
+            primarySelectedPhotoID = previousPrimaryID
+            selectedPhotoIDs = retainedSelection
+            if let anchor = selectionAnchorPhotoID, validContextIDs.contains(anchor) {
+                selectionAnchorPhotoID = anchor
+            } else {
+                selectionAnchorPhotoID = previousPrimaryID
+            }
+            return
+        }
+        
+        if let fallbackSelection = retainedSelection.first {
+            primarySelectedPhotoID = fallbackSelection
+            selectedPhotoIDs = retainedSelection
+            selectionAnchorPhotoID = fallbackSelection
+            return
+        }
+        
+        if let firstContextID = contextIDs.first {
+            selectSingle(firstContextID, deferred: false)
+        } else {
+            clearSelection(deferred: false)
+            selectionContext = .grid
         }
     }
     
@@ -980,11 +1090,19 @@ class PhotoSorterViewModel: ObservableObject {
     var hasSelectableItemsInCurrentContext: Bool {
         !selectableIDs(for: selectionContext).isEmpty
     }
+    
+    var currentFolderPhotos: [PhotoItem] {
+        guard let currentFolder else { return [] }
+        let normalizedCurrentFolder = currentFolder.standardizedFileURL
+        return photos.filter { photo in
+            photo.url.deletingLastPathComponent().standardizedFileURL == normalizedCurrentFolder
+        }
+    }
 
     private func selectableIDs(for context: SelectionContext) -> [UUID] {
         switch context {
         case .grid:
-            return photos.map { $0.id }
+            return currentFolderPhotos.map { $0.id }
         case .keep:
             return photos.filter { $0.status == .groupA }.map { $0.id }
         case .discard:
@@ -1087,21 +1205,8 @@ class PhotoSorterViewModel: ObservableObject {
     
     // Resort current photos according to sortMode
     func resortPhotos() {
-        let comparator: (PhotoItem, PhotoItem) -> Bool = { a, b in
-            let da: Date
-            let db: Date
-            switch self.sortMode {
-            case .fileCreation:
-                da = a.fileCreationDate ?? .distantFuture
-                db = b.fileCreationDate ?? .distantFuture
-            case .exifPreferred:
-                da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
-                db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
-            }
-            return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
-        }
         DispatchQueue.main.async {
-            self.photos.sort(by: comparator)
+            self.photos = self.sortedPhotos(self.photos)
         }
     }
     
@@ -1127,6 +1232,7 @@ class PhotoSorterViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let fileManager = FileManager.default
             var movedFolders: [(from: URL, to: URL)] = []
+            var movedPhotoSourceURLs: Set<URL> = []
             for url in urls {
                 let sourceURL = url.standardizedFileURL
                 var destinationURL = destinationFolder.appendingPathComponent(sourceURL.lastPathComponent)
@@ -1154,6 +1260,8 @@ class PhotoSorterViewModel: ObservableObject {
                     try fileManager.moveItem(at: sourceURL, to: destinationURL)
                     if isDir.boolValue {
                         movedFolders.append((from: sourceURL, to: destinationURL))
+                    } else {
+                        movedPhotoSourceURLs.insert(sourceURL)
                     }
                 } catch {
                     DispatchQueue.main.async {
@@ -1163,6 +1271,18 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
+                
+                let previousPrimaryID = self.primarySelectedPhotoID
+                let previousSelectedIDs = self.selectedPhotoIDs
+                if !movedPhotoSourceURLs.isEmpty {
+                    self.photos.removeAll { photo in
+                        movedPhotoSourceURLs.contains(photo.url.standardizedFileURL)
+                    }
+                    if self.currentFolder == nil {
+                        self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                                                previousSelectedIDs: previousSelectedIDs)
+                    }
+                }
                 
                 // Update selected/current folder URLs if any directories were moved
                 for mapping in movedFolders {
@@ -1243,76 +1363,90 @@ class PhotoSorterViewModel: ObservableObject {
     
     // Execute move for Group B items
     func executeMoves() {
-        guard let currentFolder = currentFolder else { return }
+        let itemsToMove = photos.filter { $0.status == .groupB }
+        guard !itemsToMove.isEmpty else { return }
         
         isProcessing = true
         let fileManager = FileManager.default
         
-        // Target folder: sibling of currentFolder, named "<currentFolderName>_没"
-        let parentFolder = currentFolder.deletingLastPathComponent()
-        let siblingFolderName = currentFolder.lastPathComponent + "_没"
-        let discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
-        var didCreateDiscardFolder = false
-        
-        // Ensure destination exists. If we fail (sandbox, perms), fallback to subfolder "没" inside currentFolder
-        func ensureDestination() -> URL? {
-            if fileManager.fileExists(atPath: discardFolderURL.path) {
-                return discardFolderURL
-            }
-            do {
-                try fileManager.createDirectory(at: discardFolderURL, withIntermediateDirectories: true, attributes: nil)
-                didCreateDiscardFolder = true
-                return discardFolderURL
-            } catch {
-                // Fallback
-                let fallback = currentFolder.appendingPathComponent("没")
+        DispatchQueue.global(qos: .userInitiated).async {
+            var destinationCache: [URL: URL] = [:]
+            var movedIDs: Set<UUID> = []
+            var didCreateDiscardFolder = false
+            var firstErrorMessage: String?
+            
+            func ensureDestination(for sourceFolder: URL) -> URL? {
+                let normalizedSourceFolder = sourceFolder.standardizedFileURL
+                if let cached = destinationCache[normalizedSourceFolder] {
+                    return cached
+                }
+                
+                let parentFolder = normalizedSourceFolder.deletingLastPathComponent()
+                let siblingFolderName = normalizedSourceFolder.lastPathComponent + "_没"
+                let discardFolderURL = parentFolder.appendingPathComponent(siblingFolderName)
+                
+                if fileManager.fileExists(atPath: discardFolderURL.path) {
+                    destinationCache[normalizedSourceFolder] = discardFolderURL
+                    return discardFolderURL
+                }
+                
                 do {
-                    if !fileManager.fileExists(atPath: fallback.path) {
-                        try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true, attributes: nil)
-                        didCreateDiscardFolder = true
-                    }
-                    DispatchQueue.main.async {
-                        print("[Move] Could not create sibling discard folder (\(discardFolderURL.path)). Falling back to \(fallback.path). Error: \(error.localizedDescription)")
-                    }
-                    return fallback
+                    try fileManager.createDirectory(at: discardFolderURL, withIntermediateDirectories: true, attributes: nil)
+                    didCreateDiscardFolder = true
+                    destinationCache[normalizedSourceFolder] = discardFolderURL
+                    return discardFolderURL
                 } catch {
-                    DispatchQueue.main.async {
-                        self.errorMessage = "Failed to create discard folder: \(error.localizedDescription)"
-                        self.showError = true
-                        self.isProcessing = false
+                    let fallback = normalizedSourceFolder.appendingPathComponent("没")
+                    do {
+                        if !fileManager.fileExists(atPath: fallback.path) {
+                            try fileManager.createDirectory(at: fallback, withIntermediateDirectories: true, attributes: nil)
+                            didCreateDiscardFolder = true
+                        }
+                        destinationCache[normalizedSourceFolder] = fallback
+                        return fallback
+                    } catch {
+                        if firstErrorMessage == nil {
+                            firstErrorMessage = "Failed to create discard folder for \(normalizedSourceFolder.lastPathComponent): \(error.localizedDescription)"
+                        }
+                        return nil
                     }
-                    return nil
                 }
             }
-        }
-        
-        guard let destinationRoot = ensureDestination() else { return }
-
-        if didCreateDiscardFolder {
-            DispatchQueue.main.async {
-                self.refreshAllFolderTrees()
-            }
-        }
-        
-        let itemsToMove = photos.filter { $0.status == .groupB }
-        
-        DispatchQueue.global(qos: .userInitiated).async {
+            
             for item in itemsToMove {
-                let destinationURL = destinationRoot.appendingPathComponent(item.url.lastPathComponent)
+                let sourceFolder = item.url.deletingLastPathComponent()
+                guard let destinationRoot = ensureDestination(for: sourceFolder) else { continue }
+                
+                var destinationURL = destinationRoot.appendingPathComponent(item.url.lastPathComponent)
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    destinationURL = self.uniqueMoveURL(for: destinationURL, fileManager: fileManager)
+                }
+                
                 do {
                     try fileManager.moveItem(at: item.url, to: destinationURL)
-                    
-                    DispatchQueue.main.async {
-                        if let index = self.photos.firstIndex(where: { $0.id == item.id }) {
-                            self.photos.remove(at: index)
-                        }
-                    }
+                    movedIDs.insert(item.id)
                 } catch {
-                    print("[Move] Failed to move \(item.filename): \(error.localizedDescription)")
+                    if firstErrorMessage == nil {
+                        firstErrorMessage = "Failed to move \(item.filename): \(error.localizedDescription)"
+                    }
                 }
             }
             
             DispatchQueue.main.async {
+                let previousPrimaryID = self.primarySelectedPhotoID
+                let previousSelectedIDs = self.selectedPhotoIDs
+                if !movedIDs.isEmpty {
+                    self.photos.removeAll { movedIDs.contains($0.id) }
+                    self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                                            previousSelectedIDs: previousSelectedIDs)
+                }
+                if didCreateDiscardFolder {
+                    self.refreshAllFolderTrees()
+                }
+                if let firstErrorMessage {
+                    self.errorMessage = firstErrorMessage
+                    self.showError = true
+                }
                 self.isProcessing = false
             }
         }
