@@ -886,21 +886,17 @@ class PhotoSorterViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let fm = FileManager.default
             do {
-                try fm.trashItem(at: normalizedURL, resultingItemURL: nil)
+                if self.shouldMoveToPendingDeletionInsteadOfTrash(normalizedURL) {
+                    try self.moveItemToPendingDeletion(normalizedURL, fileManager: fm)
+                } else {
+                    try fm.trashItem(at: normalizedURL, resultingItemURL: nil)
+                }
                 DispatchQueue.main.async {
                     self.handleFolderRemoved(normalizedURL, fallbackSelection: parentURL, panel: panel)
                 }
             } catch let trashError {
                 do {
-                    let pendingDeletionFolder = self.pendingDeletionFolder(in: parentURL, deleting: normalizedURL)
-                    if !fm.fileExists(atPath: pendingDeletionFolder.path) {
-                        try fm.createDirectory(at: pendingDeletionFolder, withIntermediateDirectories: false, attributes: nil)
-                    }
-                    let baseDestination = pendingDeletionFolder.appendingPathComponent(normalizedURL.lastPathComponent)
-                    let destinationURL = self.uniqueURL(for: baseDestination, fileManager: fm) { index in
-                        index == 1 ? " deleted" : " deleted \(index)"
-                    }
-                    try fm.moveItem(at: normalizedURL, to: destinationURL)
+                    try self.moveItemToPendingDeletion(normalizedURL, fileManager: fm)
                     DispatchQueue.main.async {
                         self.handleFolderRemoved(normalizedURL, fallbackSelection: parentURL, panel: panel)
                     }
@@ -919,6 +915,19 @@ class PhotoSorterViewModel: ObservableObject {
             return defaultURL
         }
         return parentURL.appendingPathComponent("削除予定_退避", isDirectory: true)
+    }
+
+    private func moveItemToPendingDeletion(_ sourceURL: URL, fileManager fm: FileManager) throws {
+        let parentURL = sourceURL.deletingLastPathComponent()
+        let pendingDeletionFolder = pendingDeletionFolder(in: parentURL, deleting: sourceURL)
+        if !fm.fileExists(atPath: pendingDeletionFolder.path) {
+            try fm.createDirectory(at: pendingDeletionFolder, withIntermediateDirectories: false, attributes: nil)
+        }
+        let baseDestination = pendingDeletionFolder.appendingPathComponent(sourceURL.lastPathComponent)
+        let destinationURL = uniqueURL(for: baseDestination, fileManager: fm) { index in
+            index == 1 ? " deleted" : " deleted \(index)"
+        }
+        try fm.moveItem(at: sourceURL, to: destinationURL)
     }
     
     private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
@@ -1003,6 +1012,150 @@ class PhotoSorterViewModel: ObservableObject {
                 let photoURL = self.photos[i].url.standardizedFileURL
                 if target.contains(photoURL) {
                     self.photos[i].status = status
+                }
+            }
+        }
+    }
+
+    func deletePhotos(withIDs ids: Set<UUID>) {
+        removePhotosFromList(withIDs: ids, fileOp: { url, fm in
+            try fm.removeItem(at: url)
+        }, errorLabel: { "完全削除に失敗したファイル:\n\($0)" })
+    }
+
+    func trashPhotos(withIDs ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        let toDelete = photos.filter { ids.contains($0.id) }
+        guard !toDelete.isEmpty else { return }
+
+        let idURLPairs: [(id: UUID, url: URL)] = toDelete.map { ($0.id, $0.url) }
+        let (pendingDeletionPairs, trashPairs) = idURLPairs.reduce(into: (pending: [(id: UUID, url: URL)](), trash: [(id: UUID, url: URL)]())) { result, pair in
+            if shouldMoveToPendingDeletionInsteadOfTrash(pair.url) {
+                result.pending.append(pair)
+            } else {
+                result.trash.append(pair)
+            }
+        }
+
+        movePhotosToTrashOrPendingDeletion(trashPairs: trashPairs, pendingDeletionPairs: pendingDeletionPairs)
+    }
+
+    private func movePhotosToTrashOrPendingDeletion(trashPairs: [(id: UUID, url: URL)],
+                                                    pendingDeletionPairs: [(id: UUID, url: URL)]) {
+        let finish: (Set<UUID>, [String], [String]) -> Void = { [weak self] removedIDs, pendingNames, failedNames in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if !removedIDs.isEmpty {
+                    let previousPrimaryID = self.primarySelectedPhotoID
+                    let previousSelectedIDs = self.selectedPhotoIDs
+                    self.photos.removeAll { removedIDs.contains($0.id) }
+                    self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                                           previousSelectedIDs: previousSelectedIDs)
+                }
+                if !failedNames.isEmpty {
+                    self.presentError("ゴミ箱または削除予定への移動に失敗しました:\n" + failedNames.joined(separator: "\n"))
+                } else if !pendingNames.isEmpty {
+                    self.presentError("このボリュームではゴミ箱へ移動できない可能性があるため、以下のファイルを「削除予定」フォルダへ移動しました:\n" + pendingNames.joined(separator: "\n"))
+                }
+            }
+        }
+
+        let movePendingThenFinish: (Set<UUID>, [(id: UUID, url: URL)]) -> Void = { [weak self] trashedIDs, pairsForPendingDeletion in
+            guard let self else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.movePhotosToPendingDeletion(pairsForPendingDeletion)
+                finish(trashedIDs.union(result.movedIDs), result.movedNames, result.failedNames)
+            }
+        }
+
+        guard !trashPairs.isEmpty else {
+            movePendingThenFinish([], pendingDeletionPairs)
+            return
+        }
+
+        NSWorkspace.shared.recycle(trashPairs.map { $0.url }) { [weak self] trashedItems, _ in
+            guard let self else { return }
+            let fm = FileManager.default
+            let trashMap = Dictionary(uniqueKeysWithValues:
+                trashedItems.map { ($0.key.standardizedFileURL, $0.value) })
+
+            var trashedIDs = Set<UUID>()
+            var fallbackPairs = pendingDeletionPairs
+
+            for pair in trashPairs {
+                if let destination = trashMap[pair.url.standardizedFileURL],
+                   fm.fileExists(atPath: destination.path) {
+                    trashedIDs.insert(pair.id)
+                } else if fm.fileExists(atPath: pair.url.path) {
+                    fallbackPairs.append(pair)
+                } else {
+                    fallbackPairs.append(pair)
+                }
+            }
+
+            movePendingThenFinish(trashedIDs, fallbackPairs)
+        }
+    }
+
+    private func shouldMoveToPendingDeletionInsteadOfTrash(_ url: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [.volumeIsRemovableKey, .volumeIsEjectableKey]
+        let values = try? url.resourceValues(forKeys: keys)
+        if values?.volumeIsRemovable == true || values?.volumeIsEjectable == true {
+            return true
+        }
+        return url.standardizedFileURL.path.hasPrefix("/Volumes/")
+    }
+
+    private func movePhotosToPendingDeletion(_ pairs: [(id: UUID, url: URL)]) -> (movedIDs: Set<UUID>, movedNames: [String], failedNames: [String]) {
+        let fm = FileManager.default
+        var movedIDs = Set<UUID>()
+        var movedNames: [String] = []
+        var failedNames: [String] = []
+
+        for pair in pairs {
+            let sourceURL = pair.url.standardizedFileURL
+            do {
+                try moveItemToPendingDeletion(sourceURL, fileManager: fm)
+                movedIDs.insert(pair.id)
+                movedNames.append(sourceURL.lastPathComponent)
+            } catch {
+                failedNames.append(sourceURL.lastPathComponent)
+            }
+        }
+
+        return (movedIDs, movedNames, failedNames)
+    }
+
+    private func removePhotosFromList(withIDs ids: Set<UUID>,
+                                      fileOp: @escaping (URL, FileManager) throws -> Void,
+                                      errorLabel: @escaping (String) -> String) {
+        guard !ids.isEmpty else { return }
+        let toDelete = photos.filter { ids.contains($0.id) }
+        guard !toDelete.isEmpty else { return }
+        // Map id → url so we can match results back after the file operation
+        let idURLPairs: [(id: UUID, url: URL)] = toDelete.map { ($0.id, $0.url) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            var succeededIDs = Set<UUID>()
+            var failedNames: [String] = []
+            for pair in idURLPairs {
+                do {
+                    try fileOp(pair.url, fm)
+                    succeededIDs.insert(pair.id)
+                } catch {
+                    failedNames.append(pair.url.lastPathComponent)
+                }
+            }
+            DispatchQueue.main.async {
+                if !succeededIDs.isEmpty {
+                    let previousPrimaryID = self.primarySelectedPhotoID
+                    let previousSelectedIDs = self.selectedPhotoIDs
+                    self.photos.removeAll { succeededIDs.contains($0.id) }
+                    self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
+                                                           previousSelectedIDs: previousSelectedIDs)
+                }
+                if !failedNames.isEmpty {
+                    self.presentError(errorLabel(failedNames.joined(separator: "\n")))
                 }
             }
         }

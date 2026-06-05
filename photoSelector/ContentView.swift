@@ -967,6 +967,7 @@ struct PhotoGridItem: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @State private var showDeleteConfirmation = false
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
@@ -1023,6 +1024,29 @@ struct PhotoGridItem: View {
             Button("未分類に戻す") {
                 handleContextMenuAction(.unknown)
             }
+            Divider()
+            Button("削除", role: .destructive) {
+                DispatchQueue.main.async {
+                    onEnsureSelectedForContextMenu?()
+                    showDeleteConfirmation = true
+                }
+            }
+        }
+        .alert("ファイルを削除", isPresented: $showDeleteConfirmation) {
+            Button("完全削除", role: .destructive) {
+                viewModel.deletePhotos(withIDs: viewModel.selectedPhotoIDs)
+            }
+            Button("ゴミ箱/削除予定へ移動") {
+                viewModel.trashPhotos(withIDs: viewModel.selectedPhotoIDs)
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            let count = viewModel.selectedPhotoIDs.count
+            if count <= 1 {
+                Text("選択した写真を削除します。")
+            } else {
+                Text("選択した\(count)枚の写真を削除します。")
+            }
         }
 #if os(macOS)
         .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
@@ -1031,7 +1055,7 @@ struct PhotoGridItem: View {
             loadThumbnail()
         }
     }
-    
+
     private func handleContextMenuAction(_ status: PhotoStatus) {
         DispatchQueue.main.async {
             onEnsureSelectedForContextMenu?()
