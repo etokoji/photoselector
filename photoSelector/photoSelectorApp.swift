@@ -20,9 +20,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private enum AppearanceMode: String {
+    case system
+    case light
+    case dark
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system:
+            nil
+        case .light:
+            NSAppearance(named: .aqua)
+        case .dark:
+            NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
 @main
 struct photoSelectorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
     @FocusedObject private var viewModel: PhotoSorterViewModel?
     @FocusedValue(\.saveWindowLayoutDefaults) private var saveWindowLayoutDefaults
 
@@ -38,12 +56,24 @@ struct photoSelectorApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onAppear { applyAppearanceMode() }
+                .onChange(of: appearanceMode) { _, _ in applyAppearanceMode() }
         }
         .commands { appCommands }
     }
     
     @CommandsBuilder
     private var appCommands: some Commands {
+        CommandGroup(after: .toolbar) {
+            Button("ライトモード") {
+                setAppearanceMode(.light)
+            }
+
+            Button("ダークモード") {
+                setAppearanceMode(.dark)
+            }
+        }
+
         CommandGroup(after: .windowArrangement) {
             Button("現在の設定とレイアウトをデフォルトにする") {
                 saveWindowLayoutDefaults?()
@@ -84,5 +114,19 @@ struct photoSelectorApp: App {
             .keyboardShortcut("d", modifiers: [.command])
             .disabled(!(viewModel?.hasSelection ?? false))
         }
+    }
+
+    private func setAppearanceMode(_ mode: AppearanceMode) {
+        appearanceMode = mode.rawValue
+        applyAppearanceMode()
+    }
+
+    private func applyAppearanceMode() {
+        guard let mode = AppearanceMode(rawValue: appearanceMode) else {
+            NSApp.appearance = nil
+            return
+        }
+
+        NSApp.appearance = mode.nsAppearance
     }
 }
