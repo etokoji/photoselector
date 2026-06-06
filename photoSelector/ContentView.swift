@@ -377,7 +377,6 @@ struct ContentView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Select Folder"
         
         if panel.runModal() == .OK {
             if let url = panel.url {

@@ -86,11 +86,12 @@
 				};
 			};
 			buildConfigurationList = AB76E5862EDD8F7A00FAE979 /* Build configuration list for PBXProject "photoSelector" */;
-			developmentRegion = en;
+			developmentRegion = ja;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
 				Base,
+				ja,
 			);
 			mainGroup = AB76E5822EDD8F7A00FAE979;
 			minimizedProjectReferenceProxies = 1;
@@ -281,7 +282,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.etokoji.photoSelector;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -320,6 +321,7 @@
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleAllowMixedLocalizations = YES;
 				INFOPLIST_KEY_LSMultipleInstancesProhibited = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"Photo Selector Drag Payload\";\n    UTTypeIdentifier = \"dev.etokoji.photoSelector.photodrag\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            psdrag\n        );\n        \"public.mime-type\" = \"application/x-photoSelector-drag\";\n    };\n}";
@@ -328,7 +330,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.etokoji.photoSelector;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
