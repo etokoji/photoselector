@@ -23,6 +23,7 @@ struct ContentView: View {
     @State private var windowID = UUID().uuidString
     @State private var didApplyLayoutDefaults = false
     @State private var initialWindowSize: CGSize?
+    @Environment(\.undoManager) private var undoManager
     
     // Monitor for Option key state
     private var isOptionPressed: Bool {
@@ -109,7 +110,7 @@ struct ContentView: View {
                 Spacer()
                 
                 Button(action: {
-                    viewModel.executeMoves()
+                    viewModel.executeMoves(undoManager: undoManager)
                 }) {
                     Label("Move Discarded (没)", systemImage: "trash")
                 }
@@ -752,6 +753,7 @@ extension FolderTreeRow {
 private struct FolderDropDelegate: DropDelegate {
     let item: FileSystemItem
     let viewModel: PhotoSorterViewModel
+    let undoManager: UndoManager?
     
     func validateDrop(info: DropInfo) -> Bool {
         item.isFolder
@@ -784,9 +786,9 @@ private struct FolderDropDelegate: DropDelegate {
             let urls = await loadURLs(from: info)
             guard !urls.isEmpty else { return }
             if copy {
-                viewModel.copyPhotos(at: urls, to: item.id)
+                viewModel.copyPhotos(at: urls, to: item.id, undoManager: undoManager)
             } else {
-                viewModel.movePhotos(at: urls, to: item.id)
+                viewModel.movePhotos(at: urls, to: item.id, undoManager: undoManager)
             }
         }
         return true
@@ -830,16 +832,28 @@ private struct FolderDropDelegate: DropDelegate {
 @MainActor
 private struct PhotoGridDropDelegate: DropDelegate {
     let viewModel: PhotoSorterViewModel
+    let undoManager: UndoManager?
+    
+    func validateDrop(info: DropInfo) -> Bool {
+        viewModel.currentFolder != nil
+    }
     
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: isCopyGesture ? .copy : .move)
+        guard viewModel.currentFolder != nil else { return DropProposal(operation: .forbidden) }
+        return DropProposal(operation: isCopyGesture ? .copy : .move)
     }
     
     func performDrop(info: DropInfo) -> Bool {
+        guard let currentFolder = viewModel.currentFolder else { return false }
+        let copy = isCopyGesture
         Task {
             let urls = await loadURLs(from: info)
             guard !urls.isEmpty else { return }
-            viewModel.applyStatus(.unknown, to: urls)
+            if copy {
+                viewModel.copyPhotos(at: urls, to: currentFolder, undoManager: undoManager)
+            } else {
+                viewModel.movePhotos(at: urls, to: currentFolder, undoManager: undoManager)
+            }
         }
         return true
     }
@@ -888,6 +902,7 @@ struct PhotoGridView: View {
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var isContextActive: Bool = false
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(\.undoManager) private var undoManager
     
     var body: some View {
         GeometryReader { geometry in
@@ -913,7 +928,8 @@ struct PhotoGridView: View {
                 }
 #if os(macOS)
                 .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
-                        delegate: PhotoGridDropDelegate(viewModel: viewModel))
+                        delegate: PhotoGridDropDelegate(viewModel: viewModel,
+                                                        undoManager: undoManager))
 #endif
             }
         }
@@ -955,6 +971,49 @@ struct PhotoGridView: View {
             let isShift = flags.contains(.shift)
             onSelect(photo.id, photos.map { $0.id }, isCommand, isShift, .grid)
         }
+    }
+}
+
+struct DragPreviewThumbnail: View {
+    let thumbnail: NSImage?
+    let count: Int
+    let size: CGFloat
+    
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.gray.opacity(0.2))
+                        .overlay(Image(systemName: "photo"))
+                }
+            }
+            .frame(width: size, height: size)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.85), lineWidth: 2)
+            )
+            .shadow(radius: 6, y: 3)
+            
+            if count > 1 {
+                Text("\(count)")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: 28, minHeight: 28)
+                    .background(Color.accentColor, in: Capsule())
+                    .overlay(Capsule().stroke(Color.white, lineWidth: 2))
+                    .offset(x: 10, y: -10)
+            }
+        }
+        .padding(10)
     }
 }
 
@@ -1048,7 +1107,13 @@ struct PhotoGridItem: View {
             }
         }
 #if os(macOS)
-        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo))) {
+            DragPreviewThumbnail(
+                thumbnail: thumbnail,
+                count: viewModel.urlsForDrag(startingAt: photo).count,
+                size: min(CGFloat(thumbnailSize), 160)
+            )
+        }
 #endif
         .onChange(of: thumbnailSize) { oldValue, newValue in
             loadThumbnail()
@@ -1352,6 +1417,7 @@ struct FolderTreeRow: View {
     let panelKind: FolderPanelKind
     let onSelect: () -> Void
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         HStack(spacing: 4) {
@@ -1392,7 +1458,8 @@ struct FolderTreeRow: View {
         .onTapGesture(perform: onSelect)
         .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
                 delegate: FolderDropDelegate(item: item,
-                                             viewModel: viewModel))
+                                             viewModel: viewModel,
+                                             undoManager: undoManager))
 #if os(macOS)
         .onDragIf(!isRootFolder) {
             NSItemProvider(object: item.id.standardizedFileURL as NSURL)
@@ -1789,7 +1856,13 @@ struct GroupAThumbnail: View {
             }
         }
 #if os(macOS)
-        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo))) {
+            DragPreviewThumbnail(
+                thumbnail: thumbnail,
+                count: viewModel.urlsForDrag(startingAt: photo).count,
+                size: 96
+            )
+        }
 #endif
     }
     
@@ -1994,7 +2067,13 @@ struct GroupBThumbnail: View {
             }
         }
 #if os(macOS)
-        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo)))
+        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo))) {
+            DragPreviewThumbnail(
+                thumbnail: thumbnail,
+                count: viewModel.urlsForDrag(startingAt: photo).count,
+                size: 96
+            )
+        }
 #endif
     }
     

@@ -1159,16 +1159,18 @@ class PhotoSorterViewModel: ObservableObject {
             }
         }
     }
-    func copyPhotos(at urls: [URL], to destinationFolder: URL) {
+    func copyPhotos(at urls: [URL], to destinationFolder: URL, undoManager: UndoManager? = nil) {
         guard !urls.isEmpty else { return }
         let destination = destinationFolder.standardizedFileURL
         isProcessing = true
         DispatchQueue.global(qos: .userInitiated).async {
             let fm = FileManager.default
+            var copiedRecords: [FileOperationRecord] = []
+            var repeatedResolution: FileConflictResolution?
+            
             for url in urls {
                 let sourceURL = url.standardizedFileURL
                 
-                // Prevent recursive folder drops
                 var isDir: ObjCBool = false
                 if fm.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue {
                     let destPath = destination.path
@@ -1181,11 +1183,31 @@ class PhotoSorterViewModel: ObservableObject {
                     }
                 }
                 
-                let baseDestination = destination.appendingPathComponent(sourceURL.lastPathComponent)
-                let targetURL = self.uniqueCopyURL(for: baseDestination, fileManager: fm)
+                var targetURL = destination.appendingPathComponent(sourceURL.lastPathComponent).standardizedFileURL
+                var replacedBackup: URL?
+                
                 do {
+                    if fm.fileExists(atPath: targetURL.path) {
+                        let resolved = try self.resolveDestinationConflict(
+                            sourceURL: sourceURL,
+                            destinationURL: targetURL,
+                            operationName: "コピー",
+                            repeatedResolution: &repeatedResolution,
+                            fileManager: fm
+                        )
+                        guard !resolved.shouldStop else { break }
+                        guard let resolvedDestination = resolved.destinationURL else { continue }
+                        targetURL = resolvedDestination
+                        replacedBackup = resolved.replacedBackup
+                    }
                     try fm.copyItem(at: sourceURL, to: targetURL)
+                    copiedRecords.append(FileOperationRecord(source: sourceURL,
+                                                            destination: targetURL.standardizedFileURL,
+                                                            replacedBackup: replacedBackup))
                 } catch {
+                    self.restoreReplacementBackupIfNeeded(replacedBackup,
+                                                          to: targetURL,
+                                                          fileManager: fm)
                     DispatchQueue.main.async {
                         self.presentError("ファイルをコピーできませんでした: \(error.localizedDescription)")
                     }
@@ -1193,6 +1215,9 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
+                if !copiedRecords.isEmpty {
+                    self.registerCopyUndo(copiedRecords, undoManager: undoManager)
+                }
                 if let current = self.currentFolder?.standardizedFileURL, current == destination {
                     self.loadPhotos(from: destination)
                 } else {
@@ -1368,6 +1393,33 @@ class PhotoSorterViewModel: ObservableObject {
     }
 
 #if os(macOS)
+    private enum FileConflictResolution {
+        case replace
+        case coexist
+        case cancel
+    }
+    
+    private struct FileConflictPromptResult {
+        let resolution: FileConflictResolution
+        let appliesToRemaining: Bool
+    }
+    
+    private struct FileOperationRecord {
+        let source: URL
+        let destination: URL
+        let replacedBackup: URL?
+    }
+    
+    private final class ButtonActionHandler: NSObject {
+        static let shared = ButtonActionHandler()
+        var handlers: [NSButton: () -> Void] = [:]
+        
+        @objc func handleButton(_ sender: NSButton) {
+            handlers[sender]?()
+            handlers[sender] = nil
+        }
+    }
+    
     func urlsForDrag(startingAt photo: PhotoItem) -> [URL] {
         var selected = selectedPhotoIDs
         if !selected.contains(photo.id) {
@@ -1377,7 +1429,7 @@ class PhotoSorterViewModel: ObservableObject {
         return urls.isEmpty ? [photo.url] : urls
     }
 
-    func movePhotos(at urls: [URL], to destinationFolder: URL) {
+    func movePhotos(at urls: [URL], to destinationFolder: URL, undoManager: UndoManager? = nil) {
         guard !urls.isEmpty else { return }
         let destinationFolder = destinationFolder.standardizedFileURL
         isProcessing = true
@@ -1385,14 +1437,16 @@ class PhotoSorterViewModel: ObservableObject {
             let fileManager = FileManager.default
             var movedFolders: [(from: URL, to: URL)] = []
             var movedPhotoSourceURLs: Set<URL> = []
+            var movedRecords: [FileOperationRecord] = []
+            var repeatedResolution: FileConflictResolution?
+            
             for url in urls {
                 let sourceURL = url.standardizedFileURL
-                var destinationURL = destinationFolder.appendingPathComponent(sourceURL.lastPathComponent)
+                var destinationURL = destinationFolder.appendingPathComponent(sourceURL.lastPathComponent).standardizedFileURL
                 if sourceURL == destinationURL {
                     continue
                 }
                 
-                // Prevent recursive folder drops
                 var isDir: ObjCBool = false
                 if fileManager.fileExists(atPath: sourceURL.path, isDirectory: &isDir), isDir.boolValue {
                     let destPath = destinationFolder.standardizedFileURL.path
@@ -1405,17 +1459,34 @@ class PhotoSorterViewModel: ObservableObject {
                     }
                 }
                 
+                var replacedBackup: URL?
                 do {
                     if fileManager.fileExists(atPath: destinationURL.path) {
-                        destinationURL = self.uniqueMoveURL(for: destinationURL, fileManager: fileManager)
+                        let resolved = try self.resolveDestinationConflict(
+                            sourceURL: sourceURL,
+                            destinationURL: destinationURL,
+                            operationName: "移動",
+                            repeatedResolution: &repeatedResolution,
+                            fileManager: fileManager
+                        )
+                        guard !resolved.shouldStop else { break }
+                        guard let resolvedDestination = resolved.destinationURL else { continue }
+                        destinationURL = resolvedDestination
+                        replacedBackup = resolved.replacedBackup
                     }
                     try fileManager.moveItem(at: sourceURL, to: destinationURL)
+                    movedRecords.append(FileOperationRecord(source: sourceURL,
+                                                           destination: destinationURL.standardizedFileURL,
+                                                           replacedBackup: replacedBackup))
                     if isDir.boolValue {
                         movedFolders.append((from: sourceURL, to: destinationURL))
                     } else {
                         movedPhotoSourceURLs.insert(sourceURL)
                     }
                 } catch {
+                    self.restoreReplacementBackupIfNeeded(replacedBackup,
+                                                          to: destinationURL,
+                                                          fileManager: fileManager)
                     DispatchQueue.main.async {
                         self.presentError("Failed to move \(sourceURL.lastPathComponent): \(error.localizedDescription)")
                     }
@@ -1423,6 +1494,9 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
+                if !movedRecords.isEmpty {
+                    self.registerMoveUndo(movedRecords, undoManager: undoManager)
+                }
                 
                 let previousPrimaryID = self.primarySelectedPhotoID
                 let previousSelectedIDs = self.selectedPhotoIDs
@@ -1436,7 +1510,6 @@ class PhotoSorterViewModel: ObservableObject {
                     }
                 }
                 
-                // Update selected/current folder URLs if any directories were moved
                 for mapping in movedFolders {
                     self.updateStoredURLsAfterMove(from: mapping.from, to: mapping.to)
                 }
@@ -1455,7 +1528,339 @@ class PhotoSorterViewModel: ObservableObject {
         let rootPath = root.path
         return path == rootPath || path.hasPrefix(rootPath + "/")
     }
+    
+    private func resolveDestinationConflict(sourceURL: URL,
+                                            destinationURL: URL,
+                                            operationName: String,
+                                            repeatedResolution: inout FileConflictResolution?,
+                                            fileManager: FileManager) throws -> (destinationURL: URL?, replacedBackup: URL?, shouldStop: Bool) {
+        let resolution: FileConflictResolution
+        if let repeatedResolution {
+            resolution = repeatedResolution
+        } else {
+            let promptResult = promptForFileConflict(sourceURL: sourceURL,
+                                                     destinationURL: destinationURL,
+                                                     operationName: operationName)
+            resolution = promptResult.resolution
+            if promptResult.appliesToRemaining {
+                repeatedResolution = resolution
+            }
+        }
+        
+        switch resolution {
+        case .replace:
+            let backupURL = try backupExistingItem(at: destinationURL, fileManager: fileManager)
+            return (destinationURL, backupURL, false)
+        case .coexist:
+            return (uniqueNumberedURL(for: destinationURL, fileManager: fileManager), nil, false)
+        case .cancel:
+            return (nil, nil, repeatedResolution == .cancel)
+        }
+    }
+    
+    private func promptForFileConflict(sourceURL: URL,
+                                       destinationURL: URL,
+                                       operationName: String) -> FileConflictPromptResult {
+        var result = FileConflictPromptResult(resolution: .cancel, appliesToRemaining: false)
+        DispatchQueue.main.sync {
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 480, height: 188),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "同名の項目があります"
+            panel.isReleasedWhenClosed = false
+            panel.level = .modalPanel
+            
+            let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+            panel.contentView = contentView
+            
+            let iconView = NSImageView(image: NSImage(named: NSImage.cautionName) ?? NSImage())
+            iconView.translatesAutoresizingMaskIntoConstraints = false
+            iconView.imageScaling = .scaleProportionallyDown
+            contentView.addSubview(iconView)
+            
+            let titleLabel = NSTextField(labelWithString: "同名の項目があります")
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            titleLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+            contentView.addSubview(titleLabel)
+            
+            let messageLabel = NSTextField(wrappingLabelWithString: "\"\(sourceURL.lastPathComponent)\" の\(operationName)先に同名の項目があります。")
+            messageLabel.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(messageLabel)
+            
+            let appliesToRemainingButton = NSButton(checkboxWithTitle: "以降の競合にも同じ処理を適用", target: nil, action: nil)
+            appliesToRemainingButton.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(appliesToRemainingButton)
+            
+            let buttonStack = NSStackView()
+            buttonStack.translatesAutoresizingMaskIntoConstraints = false
+            buttonStack.orientation = .horizontal
+            buttonStack.alignment = .centerY
+            buttonStack.spacing = 8
+            contentView.addSubview(buttonStack)
+            
+            var selectedResolution: FileConflictResolution = .cancel
+            func addButton(title: String, resolution: FileConflictResolution, keyEquivalent: String = "") {
+                let button = NSButton(title: title, target: nil, action: nil)
+                button.bezelStyle = .rounded
+                button.keyEquivalent = keyEquivalent
+                button.setButtonType(.momentaryPushIn)
+                button.target = ButtonActionHandler.shared
+                button.action = #selector(ButtonActionHandler.shared.handleButton(_:))
+                button.identifier = NSUserInterfaceItemIdentifier(title)
+                ButtonActionHandler.shared.handlers[button] = {
+                    selectedResolution = resolution
+                    NSApp.stopModal()
+                }
+                buttonStack.addArrangedSubview(button)
+            }
+            
+            addButton(title: "両方とも残す", resolution: .coexist)
+            addButton(title: "中止", resolution: .cancel, keyEquivalent: "\u{1b}")
+            addButton(title: "置き換える", resolution: .replace)
+            
+            NSLayoutConstraint.activate([
+                iconView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+                iconView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+                iconView.widthAnchor.constraint(equalToConstant: 42),
+                iconView.heightAnchor.constraint(equalToConstant: 42),
+                
+                titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 16),
+                titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+                titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 22),
+                
+                messageLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+                messageLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+                messageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+                
+                appliesToRemainingButton.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+                appliesToRemainingButton.trailingAnchor.constraint(lessThanOrEqualTo: titleLabel.trailingAnchor),
+                appliesToRemainingButton.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 16),
+                
+                buttonStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+                buttonStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18)
+            ])
+            
+            if let window = NSApp.keyWindow {
+                window.beginSheet(panel)
+            }
+            NSApp.runModal(for: panel)
+            panel.sheetParent?.endSheet(panel)
+            panel.close()
+            
+            result = FileConflictPromptResult(
+                resolution: selectedResolution,
+                appliesToRemaining: appliesToRemainingButton.state == .on
+            )
+        }
+        return result
+    }
+    
+    private func backupExistingItem(at url: URL, fileManager: FileManager) throws -> URL {
+        let backupFolder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("photoSelectorReplacementBackups", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: backupFolder, withIntermediateDirectories: true)
+        let backupURL = backupFolder.appendingPathComponent(url.lastPathComponent)
+        try fileManager.moveItem(at: url, to: backupURL)
+        return backupURL.standardizedFileURL
+    }
+    
+    private func restoreReplacementBackupIfNeeded(_ backupURL: URL?, to destinationURL: URL, fileManager: FileManager) {
+        guard let backupURL,
+              fileManager.fileExists(atPath: backupURL.path),
+              !fileManager.fileExists(atPath: destinationURL.path)
+        else { return }
+        try? fileManager.moveItem(at: backupURL, to: destinationURL)
+    }
+    
+    private func uniqueNumberedURL(for destination: URL, fileManager: FileManager) -> URL {
+        uniqueURL(for: destination, fileManager: fileManager) { index in
+            "_\(index)"
+        }
+    }
 
+    private func registerCopyUndo(_ records: [FileOperationRecord], undoManager: UndoManager?) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { target in
+            target.undoCopy(records, undoManager: undoManager)
+        }
+        undoManager.setActionName("コピー")
+    }
+    
+    private func undoCopy(_ records: [FileOperationRecord], undoManager: UndoManager) {
+        isProcessing = true
+        let fileManager = FileManager.default
+        var undoneRecords: [FileOperationRecord] = []
+        var failedNames: [String] = []
+        
+        for record in records {
+            do {
+                if fileManager.fileExists(atPath: record.destination.path) {
+                    try fileManager.removeItem(at: record.destination)
+                }
+                if let replacedBackup = record.replacedBackup,
+                   fileManager.fileExists(atPath: replacedBackup.path) {
+                    try fileManager.moveItem(at: replacedBackup, to: record.destination)
+                }
+                undoneRecords.append(record)
+            } catch {
+                failedNames.append(record.destination.lastPathComponent)
+            }
+        }
+        
+        isProcessing = false
+        if !undoneRecords.isEmpty {
+            undoManager.registerUndo(withTarget: self) { target in
+                target.redoCopy(undoneRecords, undoManager: undoManager)
+            }
+            undoManager.setActionName("コピー")
+        }
+        refreshAfterFileChanges()
+        if !failedNames.isEmpty {
+            presentError("コピーの取り消しに失敗しました:\n" + failedNames.joined(separator: "\n"))
+        }
+    }
+    
+    private func redoCopy(_ records: [FileOperationRecord], undoManager: UndoManager) {
+        isProcessing = true
+        let fileManager = FileManager.default
+        var copiedRecords: [FileOperationRecord] = []
+        var failedNames: [String] = []
+        
+        for record in records {
+            var replacedBackup: URL?
+            do {
+                guard fileManager.fileExists(atPath: record.source.path) else {
+                    failedNames.append(record.source.lastPathComponent)
+                    continue
+                }
+                if fileManager.fileExists(atPath: record.destination.path) {
+                    replacedBackup = try backupExistingItem(at: record.destination, fileManager: fileManager)
+                }
+                try fileManager.copyItem(at: record.source, to: record.destination)
+                copiedRecords.append(FileOperationRecord(source: record.source,
+                                                        destination: record.destination,
+                                                        replacedBackup: replacedBackup))
+            } catch {
+                restoreReplacementBackupIfNeeded(replacedBackup,
+                                                 to: record.destination,
+                                                 fileManager: fileManager)
+                failedNames.append(record.destination.lastPathComponent)
+            }
+        }
+        
+        isProcessing = false
+        if !copiedRecords.isEmpty {
+            registerCopyUndo(copiedRecords, undoManager: undoManager)
+        }
+        refreshAfterFileChanges()
+        if !failedNames.isEmpty {
+            presentError("コピーのやり直しに失敗しました:\n" + failedNames.joined(separator: "\n"))
+        }
+    }
+    
+    private func registerMoveUndo(_ records: [FileOperationRecord], undoManager: UndoManager?) {
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { target in
+            target.undoMove(records, undoManager: undoManager)
+        }
+        undoManager.setActionName("移動")
+    }
+    
+    private func undoMove(_ records: [FileOperationRecord], undoManager: UndoManager) {
+        isProcessing = true
+        let fileManager = FileManager.default
+        var undoneRecords: [FileOperationRecord] = []
+        var failedNames: [String] = []
+        
+        for record in records {
+            do {
+                guard fileManager.fileExists(atPath: record.destination.path) else {
+                    failedNames.append(record.destination.lastPathComponent)
+                    continue
+                }
+                if fileManager.fileExists(atPath: record.source.path) {
+                    failedNames.append(record.source.lastPathComponent)
+                    continue
+                }
+                try fileManager.moveItem(at: record.destination, to: record.source)
+                if let replacedBackup = record.replacedBackup,
+                   fileManager.fileExists(atPath: replacedBackup.path) {
+                    try fileManager.moveItem(at: replacedBackup, to: record.destination)
+                }
+                undoneRecords.append(record)
+            } catch {
+                failedNames.append(record.destination.lastPathComponent)
+            }
+        }
+        
+        isProcessing = false
+        for record in undoneRecords {
+            updateStoredURLsAfterMove(from: record.destination, to: record.source)
+        }
+        if !undoneRecords.isEmpty {
+            undoManager.registerUndo(withTarget: self) { target in
+                target.redoMove(undoneRecords, undoManager: undoManager)
+            }
+            undoManager.setActionName("移動")
+        }
+        refreshAfterFileChanges()
+        if !failedNames.isEmpty {
+            presentError("移動の取り消しに失敗しました:\n" + failedNames.joined(separator: "\n"))
+        }
+    }
+    
+    private func redoMove(_ records: [FileOperationRecord], undoManager: UndoManager) {
+        isProcessing = true
+        let fileManager = FileManager.default
+        var movedRecords: [FileOperationRecord] = []
+        var failedNames: [String] = []
+        
+        for record in records {
+            var replacedBackup: URL?
+            do {
+                guard fileManager.fileExists(atPath: record.source.path) else {
+                    failedNames.append(record.source.lastPathComponent)
+                    continue
+                }
+                if fileManager.fileExists(atPath: record.destination.path) {
+                    replacedBackup = try backupExistingItem(at: record.destination, fileManager: fileManager)
+                }
+                try fileManager.moveItem(at: record.source, to: record.destination)
+                movedRecords.append(FileOperationRecord(source: record.source,
+                                                       destination: record.destination,
+                                                       replacedBackup: replacedBackup))
+            } catch {
+                restoreReplacementBackupIfNeeded(replacedBackup,
+                                                 to: record.destination,
+                                                 fileManager: fileManager)
+                failedNames.append(record.source.lastPathComponent)
+            }
+        }
+        
+        isProcessing = false
+        for record in movedRecords {
+            updateStoredURLsAfterMove(from: record.source, to: record.destination)
+        }
+        if !movedRecords.isEmpty {
+            registerMoveUndo(movedRecords, undoManager: undoManager)
+        }
+        refreshAfterFileChanges()
+        if !failedNames.isEmpty {
+            presentError("移動のやり直しに失敗しました:\n" + failedNames.joined(separator: "\n"))
+        }
+    }
+    
+    private func refreshAfterFileChanges() {
+        if let current = currentFolder {
+            loadPhotos(from: current)
+        }
+        refreshAllFolderTrees()
+    }
+    
     private func updateStoredURLsAfterMove(from sourceURL: URL, to destinationURL: URL) {
         let srcPath = sourceURL.standardizedFileURL.path
         let dstPath = destinationURL.standardizedFileURL.path
@@ -1514,7 +1919,7 @@ class PhotoSorterViewModel: ObservableObject {
 #endif
     
     // Execute move for Group B items
-    func executeMoves() {
+    func executeMoves(undoManager: UndoManager? = nil) {
         let itemsToMove = photos.filter { $0.status == .groupB }
         guard !itemsToMove.isEmpty else { return }
         
@@ -1524,6 +1929,7 @@ class PhotoSorterViewModel: ObservableObject {
             let fileManager = FileManager.default
             var destinationCache: [URL: URL] = [:]
             var movedIDs: Set<UUID> = []
+            var movedRecords: [FileOperationRecord] = []
             var didCreateDiscardFolder = false
             var firstErrorMessage: String?
             
@@ -1575,8 +1981,12 @@ class PhotoSorterViewModel: ObservableObject {
                 }
                 
                 do {
-                    try fileManager.moveItem(at: item.url, to: destinationURL)
+                    let sourceURL = item.url.standardizedFileURL
+                    try fileManager.moveItem(at: sourceURL, to: destinationURL)
                     movedIDs.insert(item.id)
+                    movedRecords.append(FileOperationRecord(source: sourceURL,
+                                                            destination: destinationURL.standardizedFileURL,
+                                                            replacedBackup: nil))
                 } catch {
                     if firstErrorMessage == nil {
                         firstErrorMessage = "Failed to move \(item.filename): \(error.localizedDescription)"
@@ -1587,6 +1997,9 @@ class PhotoSorterViewModel: ObservableObject {
             DispatchQueue.main.async {
                 let previousPrimaryID = self.primarySelectedPhotoID
                 let previousSelectedIDs = self.selectedPhotoIDs
+                if !movedRecords.isEmpty {
+                    self.registerMoveUndo(movedRecords, undoManager: undoManager)
+                }
                 if !movedIDs.isEmpty {
                     self.photos.removeAll { movedIDs.contains($0.id) }
                     self.reconcileSelectionAfterPhotoUpdate(previousPrimaryID: previousPrimaryID,
