@@ -54,18 +54,6 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Toolbar Area
             HStack {
-                Button(action: { selectFolder(for: .primary) }) {
-                    Label("Open Folder 1", systemImage: "folder")
-                }
-                
-                Button(action: { selectFolder(for: .secondary) }) {
-                    Label("Open Folder 2", systemImage: "externaldrive")
-                }
-                
-                Toggle("縦並び", isOn: $folderPanelsAreVertical)
-                    .toggleStyle(.switch)
-                    .help("フォルダーパネルを縦並び/横並びに切り替え")
-                
                 Spacer()
                 
                 // Thumbnail Size Slider
@@ -122,23 +110,9 @@ struct ContentView: View {
             
             // Main Content with Side Panel (use native NSSplitView via representable on macOS)
 #if os(macOS)
-            // Nested SplitView for 3-pane layout (left panel: folder tree + EXIF)
+            // Nested SplitView for 3-pane layout (left sidebar + content)
             SplitViewRepresentable(
-                left: VerticalSplitViewRepresentable(
-                    top: FolderPanelsContainer(
-                        primaryFolderTree: viewModel.folderTree,
-                        primarySelectedFolderURL: $viewModel.selectedFolderURL,
-                        secondaryFolderTree: viewModel.secondaryFolderTree,
-                        secondarySelectedFolderURL: $viewModel.secondarySelectedFolderURL,
-                        isVertical: folderPanelsAreVertical,
-                        windowID: windowID
-                    ),
-                    bottom: ExifInfoPanel()
-                        .frame(minWidth: 150, maxHeight: .infinity),
-                    minTop: folderPanelsAreVertical ? 240 : 180,
-                    minBottom: 140,
-                    splitPositionKey: "\(windowID)_LeftPanelVerticalSplitPosition"
-                ),
+                left: FolderPanelsContainer(onOpenFolder: selectFolder),
                 right: SplitViewRepresentable(
                     left: PhotoGridView(
                         photos: viewModel.currentFolderPhotos,
@@ -198,28 +172,6 @@ struct ContentView: View {
             .onKeyPress(.upArrow) {
                 viewModel.moveSelection(direction: .up, columns: actualColumns)
                 return .handled
-            }
-            .onChange(of: viewModel.selectedFolderURL) { _, newValue in
-                if let url = newValue {
-                    DispatchQueue.main.async {
-                        loadPhotosIfPanelActive(url, panel: .primary)
-                    }
-                }
-            }
-            .onChange(of: viewModel.secondarySelectedFolderURL) { _, newValue in
-                if let url = newValue {
-                    DispatchQueue.main.async {
-                        loadPhotosIfPanelActive(url, panel: .secondary)
-                    }
-                }
-            }
-            .onChange(of: viewModel.activeFolderPanel) { _, newValue in
-                guard let newValue,
-                      let url = viewModel.selectedFolderURL(for: newValue)
-                else { return }
-                DispatchQueue.main.async {
-                    viewModel.loadPhotos(from: url)
-                }
             }
             .onAppear {
                 // Initialize bridge state
@@ -373,7 +325,7 @@ struct ContentView: View {
     }
 #endif
     
-    func selectFolder(for panelKind: FolderPanelKind) {
+    func selectFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -381,14 +333,9 @@ struct ContentView: View {
         
         if panel.runModal() == .OK {
             if let url = panel.url {
-                viewModel.buildFolderTree(from: url, in: panelKind)
+                viewModel.openFolderPane(from: url)
             }
         }
-    }
-    
-    private func loadPhotosIfPanelActive(_ url: URL, panel: FolderPanelKind) {
-        guard viewModel.activeFolderPanel == panel else { return }
-        viewModel.loadPhotos(from: url)
     }
     
     func openPreviewWindow(for photo: PhotoItem) {
@@ -430,86 +377,579 @@ struct ContentView: View {
 // MARK: - Subviews for ContentView
 
 struct FolderPanelsContainer: View {
-    let primaryFolderTree: [FileSystemItem]
-    @Binding var primarySelectedFolderURL: URL?
-    let secondaryFolderTree: [FileSystemItem]
-    @Binding var secondarySelectedFolderURL: URL?
-    let isVertical: Bool
-    let windowID: String
+    let onOpenFolder: () -> Void
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
-
-    var body: some View {
-        if isVertical {
-            VerticalSplitViewRepresentable(
-                top: primaryPanel
-                    .frame(minHeight: 120),
-                bottom: secondaryPanel
-                    .frame(minHeight: 120),
-                minTop: 120,
-                minBottom: 120,
-                splitPositionKey: "\(windowID)_FolderPanelsVerticalSplitPosition"
-            )
-        } else {
-            SplitViewRepresentable(
-                left: primaryPanel
-                    .frame(minWidth: 150, idealWidth: 250),
-                right: secondaryPanel
-                    .frame(minWidth: 150, idealWidth: 250),
-                minLeft: 150,
-                minRight: 150,
-                splitPositionKey: "\(windowID)_FolderPanelsSplitPosition"
-            )
-        }
-    }
-    
-    private var primaryPanel: some View {
-        FolderTreePanel(
-            title: panelTitle("Folder 1", panel: .primary),
-            folderTree: primaryFolderTree,
-            selectedFolderURL: $primarySelectedFolderURL,
-            panelKind: .primary
-        )
-    }
-    
-    private var secondaryPanel: some View {
-        FolderTreePanel(
-            title: panelTitle("Folder 2", panel: .secondary),
-            folderTree: secondaryFolderTree,
-            selectedFolderURL: $secondarySelectedFolderURL,
-            panelKind: .secondary
-        )
-    }
-    
-    private func panelTitle(_ fallback: String, panel: FolderPanelKind) -> String {
-        guard let name = viewModel.rootFolderDisplayName(for: panel) else {
-            return fallback
-        }
-        return "\(fallback): \(name)"
-    }
-}
-
-struct FolderTreePanel: View {
-    let title: String
-    let folderTree: [FileSystemItem]
-    @Binding var selectedFolderURL: URL?
-    let panelKind: FolderPanelKind
+    @State private var folderPaneHeights: [UUID: CGFloat] = [:]
+    @State private var exifPaneHeight: CGFloat = sidebarDefaultExifPaneHeight
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+            folderOpenToolbar
+            Divider()
+            GeometryReader { geometry in
+                let exifHeight = currentExifDisplayHeight(availableHeight: geometry.size.height)
+                VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(viewModel.folderPanes.enumerated()), id: \.element.id) { index, pane in
+                            SidebarResizablePane(
+                                title: panelTitle(for: pane),
+                                systemImage: "folder",
+                                height: heightBinding(for: pane.id),
+                                isResizeEnabled: index > 0,
+                                onResize: {
+                                    resizeFolderPane(
+                                        pane.id,
+                                        by: $0,
+                                        availableHeight: geometry.size.height,
+                                        exifHeight: exifHeight
+                                    )
+                                },
+                                tools: {
+                                    Button {
+                                        viewModel.refreshFolderTree(for: pane.kind)
+                                    } label: {
+                                        Image(systemName: "arrow.clockwise")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .frame(width: 14, height: 14)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.secondary)
+                                    .help("フォルダツリーを再読み込み")
+                                    
+                                    if viewModel.shouldShowEjectVolumeButton(for: pane.kind) {
+                                        Button {
+                                            viewModel.ejectVolumeForFolderPanel(pane.kind)
+                                        } label: {
+                                            Image(systemName: "eject")
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .frame(width: 14, height: 14)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+                                        .help("ボリュームを取り外す")
+                                    }
+                                },
+                                onClose: {
+                                    folderPaneHeights[pane.id] = nil
+                                    viewModel.closeFolderPane(pane.kind)
+                                }
+                            ) {
+                                FolderTreeView(
+                                    folderTree: pane.folderTree,
+                                    selectedFolderURL: Binding(
+                                        get: { viewModel.selectedFolderURL(for: pane.kind) },
+                                        set: { newValue in
+                                            if let newValue {
+                                                viewModel.setSelectedFolderURL(newValue, for: pane.kind)
+                                            }
+                                        }
+                                    ),
+                                    panelKind: pane.kind
+                                )
+                            }
+                            Divider()
+                        }
+                    }
+                    .frame(
+                        height: folderPaneListHeight(availableHeight: geometry.size.height, exifHeight: exifHeight),
+                        alignment: .top
+                    )
+                    
+                    Divider()
+                    
+                    SidebarResizablePane(
+                        title: "EXIF Info",
+                        systemImage: "info.circle",
+                        height: exifDisplayHeight(availableHeight: geometry.size.height),
+                        isResizeEnabled: !viewModel.folderPanes.isEmpty,
+                        onResize: {
+                            resizeExifPane(
+                                by: $0,
+                                currentDisplayedHeight: exifHeight
+                            )
+                        },
+                        tools: { EmptyView() },
+                        onClose: nil
+                    ) {
+                        ExifInfoPanel()
+                    }
+                }
+                .onChange(of: viewModel.folderPanes.map(\.id)) { oldValue, newValue in
+                    guard newValue.count > oldValue.count,
+                          let newPaneID = newValue.last
+                    else { return }
+                    DispatchQueue.main.async {
+                        makeRoomForNewFolderPane(
+                            newPaneID,
+                            availableHeight: geometry.size.height,
+                            exifHeight: currentExifDisplayHeight(availableHeight: geometry.size.height)
+                        )
+                    }
+                }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Material.bar)
-            
-            FolderTreeView(folderTree: folderTree,
-                           selectedFolderURL: $selectedFolderURL,
-                           panelKind: panelKind)
         }
+    }
+    
+    private var folderOpenToolbar: some View {
+        HStack(spacing: 6) {
+            Button(action: onOpenFolder) {
+                Label("Open Folder", systemImage: "folder.badge.plus")
+            }
+            .help("フォルダーを開く")
+            
+            Spacer(minLength: 0)
+        }
+        .labelStyle(.titleAndIcon)
+        .controlSize(.small)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Material.bar)
+    }
+    
+    private func panelTitle(for pane: FolderPaneState) -> String {
+        viewModel.rootFolderDisplayName(for: pane.kind) ?? pane.rootURL.lastPathComponent
+    }
+    
+    private func exifDisplayHeight(availableHeight: CGFloat) -> Binding<CGFloat> {
+        Binding(
+            get: {
+                currentExifDisplayHeight(availableHeight: availableHeight)
+            },
+            set: { exifPaneHeight = $0 }
+        )
+    }
+    
+    private func currentExifDisplayHeight(availableHeight: CGFloat) -> CGFloat {
+        max(sidebarMinimumPaneHeight, max(exifPaneHeight, availableHeight - folderPanesDisplayedHeight))
+    }
+    
+    private var folderPanesDisplayedHeight: CGFloat {
+        viewModel.folderPanes.reduce(CGFloat(0)) { total, pane in
+            let paneHeight = max(folderPaneHeights[pane.id] ?? sidebarDefaultFolderPaneHeight, sidebarMinimumPaneHeight)
+            return total + paneHeight + sidebarPaneDividerHeight
+        }
+    }
+    
+    private func folderPaneListHeight(availableHeight: CGFloat, exifHeight: CGFloat) -> CGFloat {
+        max(0, availableHeight - exifHeight)
+    }
+    
+    private func heightBinding(for id: UUID) -> Binding<CGFloat> {
+        Binding(
+            get: { folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight },
+            set: { folderPaneHeights[id] = $0 }
+        )
+    }
+    
+    private func resizeFolderPane(_ id: UUID, by dragDelta: CGFloat, availableHeight: CGFloat, exifHeight: CGFloat) {
+        let currentHeight = folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight
+        let clampedDelta = clampedFolderPaneDragDelta(
+            dragDelta,
+            paneID: id,
+            currentHeight: currentHeight,
+            availableHeight: availableHeight,
+            exifHeight: exifHeight
+        )
+        let actualDelta = adjustedDeltaForPreviousPane(before: .folder(id), proposedDelta: clampedDelta)
+        folderPaneHeights[id] = max(sidebarMinimumPaneHeight, currentHeight - actualDelta)
+    }
+    
+    private func clampedFolderPaneDragDelta(
+        _ dragDelta: CGFloat,
+        paneID: UUID,
+        currentHeight: CGFloat,
+        availableHeight: CGFloat,
+        exifHeight: CGFloat
+    ) -> CGFloat {
+        let heightClampedDelta = clampedTopBoundaryDelta(dragDelta, currentHeight: currentHeight)
+        guard heightClampedDelta > 0 else { return heightClampedDelta }
+        
+        let folderListHeight = folderPaneListHeight(availableHeight: availableHeight, exifHeight: exifHeight)
+        let titleTop = folderPaneTitleTop(for: paneID)
+        let maxTitleTop = max(0, folderListHeight - sidebarMinimumPaneHeight)
+        let availableDownwardMovement = max(0, maxTitleTop - titleTop)
+        return min(heightClampedDelta, availableDownwardMovement)
+    }
+    
+    private func folderPaneTitleTop(for id: UUID) -> CGFloat {
+        var top: CGFloat = 0
+        for pane in viewModel.folderPanes {
+            if pane.id == id {
+                return top
+            }
+            let paneHeight = max(folderPaneHeights[pane.id] ?? sidebarDefaultFolderPaneHeight, sidebarMinimumPaneHeight)
+            top += paneHeight + sidebarPaneDividerHeight
+        }
+        return top
+    }
+    
+    private func makeRoomForNewFolderPane(_ newPaneID: UUID, availableHeight: CGFloat, exifHeight: CGFloat) {
+        let folderListHeight = folderPaneListHeight(availableHeight: availableHeight, exifHeight: exifHeight)
+        var overflow = folderPanesDisplayedHeight - folderListHeight
+        guard overflow > 0 else { return }
+        
+        let previousPaneIDs = viewModel.folderPanes.map(\.id).filter { $0 != newPaneID }.reversed()
+        
+        for id in previousPaneIDs {
+            guard overflow > 0 else { return }
+            
+            let currentHeight = folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight
+            let shrink = min(overflow, max(0, currentHeight - sidebarMinimumExpandedPaneHeight))
+            guard shrink > 0 else { continue }
+            
+            folderPaneHeights[id] = currentHeight - shrink
+            overflow -= shrink
+        }
+        
+        for id in previousPaneIDs {
+            guard overflow > 0 else { return }
+            
+            let currentHeight = folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight
+            let shrink = min(overflow, max(0, currentHeight - sidebarMinimumPaneHeight))
+            guard shrink > 0 else { continue }
+            
+            folderPaneHeights[id] = currentHeight - shrink
+            overflow -= shrink
+        }
+        
+        guard overflow > 0 else { return }
+        let newHeight = folderPaneHeights[newPaneID] ?? sidebarDefaultFolderPaneHeight
+        folderPaneHeights[newPaneID] = max(sidebarMinimumPaneHeight, newHeight - overflow)
+    }
+    
+    private func resizeExifPane(by dragDelta: CGFloat, currentDisplayedHeight: CGFloat) {
+        let clampedDelta = clampedTopBoundaryDelta(dragDelta, currentHeight: currentDisplayedHeight)
+        let actualDelta = adjustedDeltaForPreviousPane(before: .exif, proposedDelta: clampedDelta)
+        exifPaneHeight = max(sidebarMinimumPaneHeight, currentDisplayedHeight - actualDelta)
+    }
+    
+    private func clampedTopBoundaryDelta(_ proposedDelta: CGFloat, currentHeight: CGFloat) -> CGFloat {
+        guard proposedDelta > 0 else { return proposedDelta }
+        let availableShrink = max(0, currentHeight - sidebarMinimumPaneHeight)
+        return min(proposedDelta, availableShrink)
+    }
+    
+    private func adjustedDeltaForPreviousPane(before pane: SidebarPaneID, proposedDelta: CGFloat) -> CGFloat {
+        guard proposedDelta != 0 else { return 0 }
+        guard let previousPane = previousPane(before: pane) else { return proposedDelta }
+        
+        switch previousPane {
+        case .folder(let previousID):
+            let previousHeight = folderPaneHeights[previousID] ?? sidebarDefaultFolderPaneHeight
+            if proposedDelta > 0 {
+                folderPaneHeights[previousID] = previousHeight + proposedDelta
+                return proposedDelta
+            } else {
+                let availableShrink = max(0, previousHeight - sidebarMinimumPaneHeight)
+                let actualDelta = -min(-proposedDelta, availableShrink)
+                folderPaneHeights[previousID] = previousHeight + actualDelta
+                return actualDelta
+            }
+        case .exif:
+            if proposedDelta > 0 {
+                exifPaneHeight += proposedDelta
+                return proposedDelta
+            } else {
+                let availableShrink = max(0, exifPaneHeight - sidebarMinimumPaneHeight)
+                let actualDelta = -min(-proposedDelta, availableShrink)
+                exifPaneHeight += actualDelta
+                return actualDelta
+            }
+        }
+    }
+    
+    private func previousPane(before pane: SidebarPaneID) -> SidebarPaneID? {
+        switch pane {
+        case .folder(let id):
+            guard let currentIndex = viewModel.folderPanes.firstIndex(where: { $0.id == id }),
+                  currentIndex > 0
+            else { return nil }
+            return .folder(viewModel.folderPanes[currentIndex - 1].id)
+        case .exif:
+            guard let lastPane = viewModel.folderPanes.last else { return nil }
+            return .folder(lastPane.id)
+        }
+    }
+    
+}
+
+private enum SidebarPaneID {
+    case folder(UUID)
+    case exif
+}
+
+private let sidebarPaneHeaderHeight: CGFloat = 28
+private let sidebarMinimumPaneHeight: CGFloat = sidebarPaneHeaderHeight
+private let sidebarMinimumExpandedPaneHeight: CGFloat = 80
+private let sidebarDefaultFolderPaneHeight: CGFloat = 220
+private let sidebarDefaultExifPaneHeight: CGFloat = 180
+private let sidebarPaneDividerHeight: CGFloat = 1
+private let sidebarMinimumResizeDelta: CGFloat = 0.2
+private let sidebarPaneTitleBackground = Color.accentColor.opacity(0.12)
+private var sidebarTooltipBackgroundColor: Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark
+            ? NSColor(calibratedWhite: 0.18, alpha: 0.96)
+            : NSColor(calibratedWhite: 0.92, alpha: 0.98)
+    })
+}
+
+struct SidebarResizablePane<Tools: View, Content: View>: View {
+    let title: String
+    let systemImage: String
+    @Binding var height: CGFloat
+    let isResizeEnabled: Bool
+    let onResize: (CGFloat) -> Void
+    @ViewBuilder let tools: Tools
+    let onClose: (() -> Void)?
+    @ViewBuilder let content: Content
+    @State private var lastDragTranslation: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            titleBar
+            
+            if height > sidebarMinimumPaneHeight {
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(height: max(height, sidebarMinimumPaneHeight))
+        .background(Color(nsColor: .controlBackgroundColor))
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+    }
+    
+    private var titleBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 14, height: 14)
+            
+            SidebarPaneTitleText(title: title)
+            
+            Spacer(minLength: 0)
+            
+            tools
+            
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("このペインを閉じる")
+            }
+        }
+        .frame(height: sidebarPaneHeaderHeight)
+        .padding(.horizontal, 8)
+        .contentShape(Rectangle())
+        .background(sidebarPaneTitleBackground)
+        .onTapGesture(perform: minimizeToTitleBar)
+        .gesture(isResizeEnabled ? resizeGesture : nil)
+    }
+    
+    private var resizeGesture: some Gesture {
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
+            .onChanged { value in
+                let dragDelta = value.translation.height - lastDragTranslation
+                guard abs(dragDelta) >= sidebarMinimumResizeDelta else { return }
+                lastDragTranslation = value.translation.height
+                onResize(dragDelta)
+            }
+            .onEnded { _ in
+                height = max(sidebarMinimumPaneHeight, height)
+                lastDragTranslation = 0
+            }
+    }
+
+    private func minimizeToTitleBar() {
+        guard isResizeEnabled else { return }
+        let dragDelta = max(0, height - sidebarMinimumPaneHeight)
+        guard dragDelta >= sidebarMinimumResizeDelta else { return }
+        onResize(dragDelta)
+    }
+}
+
+private struct SidebarPaneTitleText: View {
+    let title: String
+    @State private var availableWidth: CGFloat = 0
+    @State private var hoverTask: Task<Void, Never>?
+    @State private var anchorView: NSView?
+    @State private var tooltipWindow: NSWindow?
+    
+    private var intrinsicTitleWidth: CGFloat {
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        return (title as NSString).size(withAttributes: [.font: font]).width
+    }
+    
+    private var isTruncated: Bool {
+        intrinsicTitleWidth > availableWidth + 1
+    }
+    
+    var body: some View {
+        Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: SidebarTitleWidthPreferenceKey.self, value: proxy.size.width)
+                        .background(SidebarTitleAnchorView { view in
+                            anchorView = view
+                        })
+                }
+            )
+            .onPreferenceChange(SidebarTitleWidthPreferenceKey.self) { width in
+                availableWidth = width
+                if intrinsicTitleWidth <= width + 1 {
+                    hideTooltip()
+                }
+            }
+            .onHover(perform: handleHover)
+            .onDisappear {
+                hoverTask?.cancel()
+                hideTooltip()
+            }
+    }
+    
+    private func handleHover(_ isHovered: Bool) {
+        hoverTask?.cancel()
+        
+        guard isHovered, isTruncated else {
+            hideTooltip()
+            return
+        }
+        
+        hoverTask = Task {
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if isTruncated {
+                    showTooltip()
+                }
+            }
+        }
+    }
+    
+    private func showTooltip() {
+        guard let anchorView,
+              let sourceWindow = anchorView.window
+        else { return }
+        
+        if tooltipWindow == nil {
+            let hostingView = NSHostingView(rootView: SidebarFloatingTitleTooltip(title: title))
+            let window = NSWindow(
+                contentRect: .zero,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.backgroundColor = .clear
+            window.contentView = hostingView
+            window.hasShadow = false
+            window.isOpaque = false
+            window.ignoresMouseEvents = true
+            window.level = .floating
+            window.collectionBehavior = [.transient, .ignoresCycle]
+            tooltipWindow = window
+        }
+        
+        guard let tooltipWindow,
+              let hostingView = tooltipWindow.contentView
+        else { return }
+        
+        let fittingSize = hostingView.fittingSize
+        let clampedSize = CGSize(width: min(fittingSize.width, 520), height: fittingSize.height)
+        let anchorRect = anchorView.convert(anchorView.bounds, to: nil)
+        let screenRect = sourceWindow.convertToScreen(anchorRect)
+        let visibleFrame = sourceWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let proposedX = screenRect.minX - 10
+        let x = min(max(proposedX, visibleFrame.minX + 8), visibleFrame.maxX - clampedSize.width - 8)
+        let y = min(
+            max(screenRect.midY - clampedSize.height / 2, visibleFrame.minY + 8),
+            visibleFrame.maxY - clampedSize.height - 8
+        )
+        
+        tooltipWindow.setFrame(NSRect(origin: CGPoint(x: x, y: y), size: clampedSize), display: true)
+        tooltipWindow.orderFront(nil)
+    }
+    
+    private func hideTooltip() {
+        tooltipWindow?.orderOut(nil)
+    }
+}
+
+private struct SidebarTitleWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct SidebarTitleAnchorView: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            onResolve(view)
+        }
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            onResolve(nsView)
+        }
+    }
+}
+
+private struct SidebarFloatingTitleTooltip: View {
+    let title: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TooltipArrow()
+                .fill(sidebarTooltipBackgroundColor)
+                .frame(width: 8, height: 4)
+                .padding(.leading, 14)
+            
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(Color(nsColor: .labelColor))
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: 520, alignment: .leading)
+                .background(sidebarTooltipBackgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Color(nsColor: .separatorColor))
+                )
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 6, x: 0, y: 2)
+        .padding(6)
+    }
+}
+
+private struct TooltipArrow: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -1241,18 +1681,6 @@ struct ExifInfoPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Image(systemName: "info.circle")
-                    .foregroundStyle(.secondary)
-                Text("EXIF Info")
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(8)
-            .background(Material.bar)
-
-            Divider()
-
             if isLoading {
                 VStack { Spacer(); ProgressView(); Spacer() }
                     .frame(maxWidth: .infinity)
@@ -1425,28 +1853,6 @@ struct FolderTreeRow: View {
                 .frame(width: 16, alignment: .center)
             Text(item.name)
             Spacer(minLength: 0)
-            if viewModel.rootFolderURL(for: panelKind)?.standardizedFileURL == item.id.standardizedFileURL {
-                Button {
-                    viewModel.buildFolderTree(from: item.id, in: panelKind, resetSelection: false)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(isActiveSelection ? Color.white.opacity(0.9) : Color.secondary)
-                .help("フォルダツリーを再読み込み")
-            }
-            if viewModel.shouldShowEjectVolumeButton(for: panelKind, item: item) {
-                Button {
-                    viewModel.ejectVolumeForFolderPanel(panelKind)
-                } label: {
-                    Image(systemName: "eject")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(isActiveSelection ? Color.white.opacity(0.9) : Color.secondary)
-                .help("ボリュームを取り外す")
-            }
         }
         .foregroundStyle(isActiveSelection ? Color.white : Color.primary)
         .padding(.vertical, 2)
@@ -1465,6 +1871,13 @@ struct FolderTreeRow: View {
             NSItemProvider(object: item.id.standardizedFileURL as NSURL)
         }
         .contextMenu {
+            Button("Finderで開く") {
+                openInFinder()
+            }
+            .disabled(!item.isFolder)
+            
+            Divider()
+            
             Button("新規フォルダ") {
                 createSubfolder()
             }
@@ -1501,6 +1914,11 @@ struct FolderTreeRow: View {
     
     private var isActiveSelection: Bool {
         isSelected && viewModel.activeFolderPanel == panelKind
+    }
+    
+    private func openInFinder() {
+        guard item.isFolder else { return }
+        NSWorkspace.shared.open(item.id)
     }
 }
 

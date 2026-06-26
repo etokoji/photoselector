@@ -96,9 +96,22 @@ enum DateSortMode: String, CaseIterable, Identifiable {
     }
 }
 
-enum FolderPanelKind: Equatable {
+enum FolderPanelKind: Hashable {
     case primary
     case secondary
+    case dynamic(UUID)
+}
+
+struct FolderPaneState: Identifiable, Equatable {
+    let id: UUID
+    var rootURL: URL
+    var folderTree: [FileSystemItem]
+    var selectedFolderURL: URL?
+    var expandedFolderURLs: Set<URL>
+    
+    var kind: FolderPanelKind {
+        .dynamic(id)
+    }
 }
 
 class PhotoSorterViewModel: ObservableObject {
@@ -128,6 +141,7 @@ class PhotoSorterViewModel: ObservableObject {
     @Published var targetedFolderURL: URL?
     @Published var primaryExpandedFolderURLs: Set<URL> = []
     @Published var secondaryExpandedFolderURLs: Set<URL> = []
+    @Published var folderPanes: [FolderPaneState] = []
     
     // Column counts for keyboard navigation
     @Published var groupAColumns: Int = 2
@@ -153,6 +167,9 @@ class PhotoSorterViewModel: ObservableObject {
         case .secondary:
             previousRootURL = secondaryFolderTreeRootURL?.standardizedFileURL
             otherPanelRootURL = folderTreeRootURL?.standardizedFileURL
+        case .dynamic(let id):
+            previousRootURL = folderPanes.first(where: { $0.id == id })?.rootURL.standardizedFileURL
+            otherPanelRootURL = nil
         }
         
         do {
@@ -204,6 +221,25 @@ class PhotoSorterViewModel: ObservableObject {
             } else if secondaryExpandedFolderURLs.isEmpty {
                 secondaryExpandedFolderURLs = [normalizedRoot]
             }
+        case .dynamic(let id):
+            if let index = folderPanes.firstIndex(where: { $0.id == id }) {
+                folderPanes[index].rootURL = rootURL
+                folderPanes[index].folderTree = tree
+                if folderPanes[index].selectedFolderURL == nil || resetSelection {
+                    folderPanes[index].selectedFolderURL = rootURL
+                }
+                if resetSelection || folderPanes[index].expandedFolderURLs.isEmpty {
+                    folderPanes[index].expandedFolderURLs = [normalizedRoot]
+                }
+            } else {
+                folderPanes.append(FolderPaneState(
+                    id: id,
+                    rootURL: rootURL,
+                    folderTree: tree,
+                    selectedFolderURL: rootURL,
+                    expandedFolderURLs: [normalizedRoot]
+                ))
+            }
         }
         if resetSelection {
             activeFolderPanel = panel
@@ -227,14 +263,43 @@ class PhotoSorterViewModel: ObservableObject {
         case .secondary:
             guard let root = secondaryFolderTreeRootURL else { return }
             buildFolderTree(from: root, in: .secondary, resetSelection: false)
+        case .dynamic(let id):
+            guard let root = folderPanes.first(where: { $0.id == id })?.rootURL else { return }
+            buildFolderTree(from: root, in: .dynamic(id), resetSelection: false)
         }
     }
     
     func refreshAllFolderTrees() {
         refreshFolderTree(for: .primary)
         refreshFolderTree(for: .secondary)
+        let dynamicPanels = folderPanes.map { $0.kind }
+        for panel in dynamicPanels {
+            refreshFolderTree(for: panel)
+        }
     }
 #if os(macOS)
+    func openFolderPane(from rootURL: URL) {
+        let id = UUID()
+        buildFolderTree(from: rootURL, in: .dynamic(id))
+        loadPhotos(from: rootURL)
+    }
+    
+    func closeFolderPane(_ panel: FolderPanelKind) {
+        guard case .dynamic(let id) = panel else { return }
+        let wasActive = activeFolderPanel == panel
+        folderPanes.removeAll { $0.id == id }
+        guard wasActive else { return }
+        if let firstPane = folderPanes.first, let selected = firstPane.selectedFolderURL {
+            activeFolderPanel = firstPane.kind
+            loadPhotos(from: selected)
+        } else {
+            activeFolderPanel = nil
+            photos = []
+            currentFolder = nil
+            clearSelection(deferred: false)
+        }
+    }
+    
     var rootFolderURL: URL? {
         folderTreeRootURL?.standardizedFileURL
     }
@@ -245,25 +310,32 @@ class PhotoSorterViewModel: ObservableObject {
             return folderTreeRootURL?.standardizedFileURL
         case .secondary:
             return secondaryFolderTreeRootURL?.standardizedFileURL
+        case .dynamic(let id):
+            return folderPanes.first(where: { $0.id == id })?.rootURL.standardizedFileURL
         }
     }
     
     func rootFolderDisplayName(for panel: FolderPanelKind) -> String? {
         guard let root = rootFolderURL(for: panel) else { return nil }
         let fm = FileManager.default
+        let folderName = {
+            let displayName = fm.displayName(atPath: root.path)
+            return displayName.isEmpty ? root.lastPathComponent : displayName
+        }()
+        
         if let values = try? root.resourceValues(forKeys: [.volumeNameKey]),
            let volumeName = values.volumeName,
            !volumeName.isEmpty {
-            return volumeName
+            return "\(volumeName): \(folderName)"
         }
-        let displayName = fm.displayName(atPath: root.path)
-        return displayName.isEmpty ? root.lastPathComponent : displayName
+        return folderName
     }
     
     var windowTitle: String {
+        let dynamic = folderPanes.compactMap { rootFolderTitleName(for: $0.kind).map { "[\($0)]" } }
         let primary = rootFolderTitleName(for: .primary).map { "[\($0)]" }
         let secondary = rootFolderTitleName(for: .secondary).map { "[\($0)]" }
-        let parts = [primary, secondary].compactMap { $0 }
+        let parts = dynamic + [primary, secondary].compactMap { $0 }
         if parts.isEmpty {
             return "photoSelector"
         }
@@ -282,6 +354,8 @@ class PhotoSorterViewModel: ObservableObject {
             return selectedFolderURL
         case .secondary:
             return secondarySelectedFolderURL
+        case .dynamic(let id):
+            return folderPanes.first(where: { $0.id == id })?.selectedFolderURL
         }
     }
     
@@ -291,9 +365,13 @@ class PhotoSorterViewModel: ObservableObject {
             selectedFolderURL = url
         case .secondary:
             secondarySelectedFolderURL = url
+        case .dynamic(let id):
+            guard let index = folderPanes.firstIndex(where: { $0.id == id }) else { return }
+            folderPanes[index].selectedFolderURL = url
         }
         activeFolderPanel = panel
         expandAncestors(of: url, in: panel)
+        loadPhotos(from: url)
     }
     
     func expandedFolderURLs(for panel: FolderPanelKind) -> Set<URL> {
@@ -302,6 +380,8 @@ class PhotoSorterViewModel: ObservableObject {
             return primaryExpandedFolderURLs
         case .secondary:
             return secondaryExpandedFolderURLs
+        case .dynamic(let id):
+            return folderPanes.first(where: { $0.id == id })?.expandedFolderURLs ?? []
         }
     }
     
@@ -324,6 +404,13 @@ class PhotoSorterViewModel: ObservableObject {
             } else {
                 secondaryExpandedFolderURLs.remove(normalized)
             }
+        case .dynamic(let id):
+            guard let index = folderPanes.firstIndex(where: { $0.id == id }) else { return }
+            if expanded {
+                folderPanes[index].expandedFolderURLs.insert(normalized)
+            } else {
+                folderPanes[index].expandedFolderURLs.remove(normalized)
+            }
         }
     }
     
@@ -342,12 +429,20 @@ class PhotoSorterViewModel: ObservableObject {
             primaryExpandedFolderURLs = urls
         case .secondary:
             secondaryExpandedFolderURLs = urls
+        case .dynamic(let id):
+            guard let index = folderPanes.firstIndex(where: { $0.id == id }) else { return }
+            folderPanes[index].expandedFolderURLs = urls
         }
     }
     
     func shouldShowEjectVolumeButton(for panel: FolderPanelKind, item: FileSystemItem) -> Bool {
         guard let root = rootFolderURL(for: panel) else { return false }
         guard root == item.id.standardizedFileURL else { return false }
+        return Self.ejectableVolumeMountURL(containing: root) != nil
+    }
+    
+    func shouldShowEjectVolumeButton(for panel: FolderPanelKind) -> Bool {
+        guard let root = rootFolderURL(for: panel) else { return false }
         return Self.ejectableVolumeMountURL(containing: root) != nil
     }
     
@@ -381,13 +476,14 @@ class PhotoSorterViewModel: ObservableObject {
             secondaryFolderTreeRootURL = nil
             secondarySelectedFolderURL = nil
             secondaryExpandedFolderURLs = []
+        case .dynamic(let id):
+            folderPanes.removeAll { $0.id == id }
         }
         
         guard wasActive else { return }
         
-        let other: FolderPanelKind = (panel == .primary) ? .secondary : .primary
-        if rootFolderURL(for: other) != nil, let selected = selectedFolderURL(for: other) {
-            activeFolderPanel = other
+        if let firstPane = folderPanes.first, let selected = firstPane.selectedFolderURL {
+            activeFolderPanel = firstPane.kind
             loadPhotos(from: selected)
         } else {
             activeFolderPanel = nil
@@ -858,8 +954,7 @@ class PhotoSorterViewModel: ObservableObject {
             do {
                 try fm.moveItem(at: normalizedURL, to: destinationURL)
                 DispatchQueue.main.async {
-                    self.remapExpandedFolderURLs(from: normalizedURL, to: destinationURL, in: .primary)
-                    self.remapExpandedFolderURLs(from: normalizedURL, to: destinationURL, in: .secondary)
+                    self.remapExpandedFolderURLsInAllPanes(from: normalizedURL, to: destinationURL)
                     if self.selectedFolderURL(for: panel)?.standardizedFileURL == normalizedURL {
                         self.setSelectedFolderURL(destinationURL, for: panel)
                     }
@@ -931,8 +1026,7 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     private func handleFolderRemoved(_ removedURL: URL, fallbackSelection: URL, panel: FolderPanelKind) {
-        removeExpandedFolderURLs(under: removedURL, in: .primary)
-        removeExpandedFolderURLs(under: removedURL, in: .secondary)
+        removeExpandedFolderURLsInAllPanes(under: removedURL)
         if selectedFolderURL(for: panel)?.standardizedFileURL == removedURL {
             setSelectedFolderURL(fallbackSelection, for: panel)
         }
@@ -952,6 +1046,17 @@ class PhotoSorterViewModel: ObservableObject {
             primaryExpandedFolderURLs = remappedURLSet(primaryExpandedFolderURLs, from: sourceURL, to: destinationURL)
         case .secondary:
             secondaryExpandedFolderURLs = remappedURLSet(secondaryExpandedFolderURLs, from: sourceURL, to: destinationURL)
+        case .dynamic(let id):
+            guard let index = folderPanes.firstIndex(where: { $0.id == id }) else { return }
+            folderPanes[index].expandedFolderURLs = remappedURLSet(folderPanes[index].expandedFolderURLs, from: sourceURL, to: destinationURL)
+        }
+    }
+    
+    private func remapExpandedFolderURLsInAllPanes(from sourceURL: URL, to destinationURL: URL) {
+        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .primary)
+        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .secondary)
+        for id in folderPanes.map(\.id) {
+            remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .dynamic(id))
         }
     }
     
@@ -968,6 +1073,17 @@ class PhotoSorterViewModel: ObservableObject {
             primaryExpandedFolderURLs = filtered(primaryExpandedFolderURLs)
         case .secondary:
             secondaryExpandedFolderURLs = filtered(secondaryExpandedFolderURLs)
+        case .dynamic(let id):
+            guard let index = folderPanes.firstIndex(where: { $0.id == id }) else { return }
+            folderPanes[index].expandedFolderURLs = filtered(folderPanes[index].expandedFolderURLs)
+        }
+    }
+    
+    private func removeExpandedFolderURLsInAllPanes(under removedURL: URL) {
+        removeExpandedFolderURLs(under: removedURL, in: .primary)
+        removeExpandedFolderURLs(under: removedURL, in: .secondary)
+        for id in folderPanes.map(\.id) {
+            removeExpandedFolderURLs(under: removedURL, in: .dynamic(id))
         }
     }
     
@@ -1877,35 +1993,18 @@ class PhotoSorterViewModel: ObservableObject {
             return url
         }
         
-        let newPrimarySelected = selectedFolderURL.map { updatedURL($0) }
-        let newSecondarySelected = secondarySelectedFolderURL.map { updatedURL($0) }
         let newCurrent = currentFolder.map { updatedURL($0) }
         
-        let primaryAffected = selectedFolderURL != nil && newPrimarySelected != selectedFolderURL
-        let secondaryAffected = secondarySelectedFolderURL != nil && newSecondarySelected != secondarySelectedFolderURL
-        
-        let isPrimarySource = isURL(sourceURL, under: folderTreeRootURL)
-        let isSecondarySource = isURL(sourceURL, under: secondaryFolderTreeRootURL)
-        let isPrimaryDest = isURL(destinationURL, under: folderTreeRootURL)
-        let isSecondaryDest = isURL(destinationURL, under: secondaryFolderTreeRootURL)
-        
-        if primaryAffected && isPrimarySource && isSecondaryDest {
-            // Dragged selected folder from primary to secondary
-            secondarySelectedFolderURL = newPrimarySelected
-            selectedFolderURL = folderTreeRootURL
-            activeFolderPanel = .secondary
-        } else if secondaryAffected && isSecondarySource && isPrimaryDest {
-            // Dragged selected folder from secondary to primary
-            selectedFolderURL = newSecondarySelected
-            secondarySelectedFolderURL = secondaryFolderTreeRootURL
-            activeFolderPanel = .primary
-        } else {
-            // Move within the same panel, or non-selected folder moved
-            if let newPrimary = newPrimarySelected {
-                selectedFolderURL = newPrimary
-            }
-            if let newSecondary = newSecondarySelected {
-                secondarySelectedFolderURL = newSecondary
+        if let currentSelection = selectedFolderURL {
+            selectedFolderURL = updatedURL(currentSelection)
+        }
+        if let currentSelection = secondarySelectedFolderURL {
+            secondarySelectedFolderURL = updatedURL(currentSelection)
+        }
+        for index in folderPanes.indices {
+            folderPanes[index].rootURL = updatedURL(folderPanes[index].rootURL)
+            if let currentSelection = folderPanes[index].selectedFolderURL {
+                folderPanes[index].selectedFolderURL = updatedURL(currentSelection)
             }
         }
         
@@ -1913,8 +2012,7 @@ class PhotoSorterViewModel: ObservableObject {
             currentFolder = newCurrent
         }
         
-        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .primary)
-        remapExpandedFolderURLs(from: sourceURL, to: destinationURL, in: .secondary)
+        remapExpandedFolderURLsInAllPanes(from: sourceURL, to: destinationURL)
     }
 #endif
     
