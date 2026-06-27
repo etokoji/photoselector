@@ -705,6 +705,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
     let onClose: (() -> Void)?
     @ViewBuilder let content: Content
     @State private var lastDragTranslation: CGFloat = 0
+    @State private var isDraggingTitle = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -729,7 +730,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 14, height: 14)
             
-            SidebarPaneTitleText(title: title)
+            SidebarPaneTitleText(title: title, suppressTooltip: isDraggingTitle)
             
             Spacer(minLength: 0)
             
@@ -757,6 +758,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
     private var resizeGesture: some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .global)
             .onChanged { value in
+                isDraggingTitle = true
                 let dragDelta = value.translation.height - lastDragTranslation
                 guard abs(dragDelta) >= sidebarMinimumResizeDelta else { return }
                 lastDragTranslation = value.translation.height
@@ -765,6 +767,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
             .onEnded { _ in
                 height = max(sidebarMinimumPaneHeight, height)
                 lastDragTranslation = 0
+                isDraggingTitle = false
             }
     }
 
@@ -778,6 +781,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
 
 private struct SidebarPaneTitleText: View {
     let title: String
+    let suppressTooltip: Bool
     @State private var availableWidth: CGFloat = 0
     @State private var hoverTask: Task<Void, Never>?
     @State private var anchorView: NSView?
@@ -814,6 +818,12 @@ private struct SidebarPaneTitleText: View {
                 }
             }
             .onHover(perform: handleHover)
+            .onChange(of: suppressTooltip) { _, isSuppressed in
+                if isSuppressed {
+                    hoverTask?.cancel()
+                    hideTooltip()
+                }
+            }
             .onDisappear {
                 hoverTask?.cancel()
                 hideTooltip()
@@ -823,16 +833,16 @@ private struct SidebarPaneTitleText: View {
     private func handleHover(_ isHovered: Bool) {
         hoverTask?.cancel()
         
-        guard isHovered, isTruncated else {
+        guard isHovered, isTruncated, !suppressTooltip else {
             hideTooltip()
             return
         }
         
         hoverTask = Task {
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                if isTruncated {
+                if isTruncated && !suppressTooltip {
                     showTooltip()
                 }
             }
