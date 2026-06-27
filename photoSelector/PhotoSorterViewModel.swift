@@ -181,14 +181,16 @@ class PhotoSorterViewModel: ObservableObject {
         }
         
         do {
-            let contents = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: .skipsHiddenFiles)
-            
+            let contents = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: [])
+
             for url in contents {
                 let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .nameKey])
                 let isDirectory = resourceValues.isDirectory ?? false
                 let name = resourceValues.name ?? url.lastPathComponent
-                
-                if isDirectory {
+
+                // Skip dot-prefix system/hidden folders (e.g. .Spotlight-V100), but allow
+                // device folders like PRIVATE that have the invisible flag set without a dot prefix
+                if isDirectory && !name.hasPrefix(".") {
                     let children = buildSubTree(from: url)
                     items.append(FileSystemItem(id: url, name: name, children: children, isFolder: true))
                 }
@@ -515,12 +517,13 @@ class PhotoSorterViewModel: ObservableObject {
         var children: [FileSystemItem] = []
         
         do {
-            let contents = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: .skipsHiddenFiles)
-            
+            let contents = try fileManager.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: [.isDirectoryKey, .nameKey], options: [])
+
             for url in contents {
                 let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .nameKey])
                 if let isDirectory = resourceValues.isDirectory, isDirectory {
                     let name = resourceValues.name ?? url.lastPathComponent
+                    guard !name.hasPrefix(".") else { continue }
                     let subChildren = buildSubTree(from: url)
                     children.append(FileSystemItem(id: url, name: name, children: subChildren, isFolder: true))
                 }
@@ -568,21 +571,19 @@ class PhotoSorterViewModel: ObservableObject {
         let normalizedFolderURL = folderURL.standardizedFileURL
         let previousCurrentFolder = self.currentFolder?.standardizedFileURL
         self.currentFolder = normalizedFolderURL
-        
+
         let fileManager = FileManager.default
-        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
-        
         do {
             let fileURLs = try fileManager.contentsOfDirectory(at: normalizedFolderURL,
                                                                includingPropertiesForKeys: [.creationDateKey],
-                                                               options: options)
-            
+                                                               options: [])
+
             let imageExtensions = ["jpg", "jpeg", "png", "heic", "gif", "tiff"]
-            
+
             let imageFiles = fileURLs.filter { url in
+                !url.lastPathComponent.hasPrefix(".") &&
                 imageExtensions.contains(url.pathExtension.lowercased())
             }
-            
             // Sort URLs first to avoid EXIF unless requested
             let sortedURLs: [URL]
             switch sortMode {
@@ -615,20 +616,21 @@ class PhotoSorterViewModel: ObservableObject {
             }
             
             let items = sortedURLs.map { PhotoItem(url: $0) }
-            
+            let normalizedFolderPath = normalizedFolderURL.path.lowercased()
+
             DispatchQueue.main.async {
                 let previousPrimaryID = self.primarySelectedPhotoID
                 let previousSelectedIDs = self.selectedPhotoIDs
-                let existingByURL = Dictionary(uniqueKeysWithValues: self.photos.map { ($0.url.standardizedFileURL, $0) })
-                
+                let existingByURL = Dictionary(self.photos.map { ($0.url.standardizedFileURL, $0) }, uniquingKeysWith: { _, last in last })
+
                 let retainedPhotos = self.photos.filter { existing in
-                    existing.url.deletingLastPathComponent().standardizedFileURL != normalizedFolderURL
+                    existing.url.deletingLastPathComponent().path.lowercased() != normalizedFolderPath
                 }
                 let updatedFolderPhotos = items.map { item -> PhotoItem in
                     let key = item.url.standardizedFileURL
                     return existingByURL[key] ?? item
                 }
-                
+
                 self.photos = retainedPhotos + updatedFolderPhotos
                 
                 let didSwitchFolder = previousCurrentFolder != normalizedFolderURL
@@ -1339,9 +1341,8 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
-                if !copiedRecords.isEmpty {
-                    self.registerCopyUndo(copiedRecords, undoManager: undoManager)
-                }
+                guard !copiedRecords.isEmpty else { return }
+                self.registerCopyUndo(copiedRecords, undoManager: undoManager)
                 if let current = self.currentFolder?.standardizedFileURL, current == destination {
                     self.loadPhotos(from: destination)
                 } else {
@@ -1394,9 +1395,9 @@ class PhotoSorterViewModel: ObservableObject {
     
     var currentFolderPhotos: [PhotoItem] {
         guard let currentFolder else { return [] }
-        let normalizedCurrentFolder = currentFolder.standardizedFileURL
+        let normalizedPath = currentFolder.standardizedFileURL.path.lowercased()
         return photos.filter { photo in
-            photo.url.deletingLastPathComponent().standardizedFileURL == normalizedCurrentFolder
+            photo.url.deletingLastPathComponent().path.lowercased() == normalizedPath
         }
     }
 
@@ -1618,10 +1619,9 @@ class PhotoSorterViewModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 self.isProcessing = false
-                if !movedRecords.isEmpty {
-                    self.registerMoveUndo(movedRecords, undoManager: undoManager)
-                }
-                
+                guard !movedRecords.isEmpty else { return }
+                self.registerMoveUndo(movedRecords, undoManager: undoManager)
+
                 let previousPrimaryID = self.primarySelectedPhotoID
                 let previousSelectedIDs = self.selectedPhotoIDs
                 if !movedPhotoSourceURLs.isEmpty {
@@ -1633,11 +1633,11 @@ class PhotoSorterViewModel: ObservableObject {
                                                                 previousSelectedIDs: previousSelectedIDs)
                     }
                 }
-                
+
                 for mapping in movedFolders {
                     self.updateStoredURLsAfterMove(from: mapping.from, to: mapping.to)
                 }
-                
+
                 if let current = self.currentFolder {
                     self.loadPhotos(from: current)
                 }

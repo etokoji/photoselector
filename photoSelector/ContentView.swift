@@ -1374,6 +1374,11 @@ extension FolderTreeRow {
     }
 }
 
+private func isOnExternalVolume(_ url: URL) -> Bool {
+    guard let values = try? url.resourceValues(forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey]) else { return false }
+    return (values.volumeIsRemovable == true) || (values.volumeIsEjectable == true)
+}
+
 @MainActor
 private struct FolderDropDelegate: DropDelegate {
     let item: FileSystemItem
@@ -1398,22 +1403,23 @@ private struct FolderDropDelegate: DropDelegate {
     
     func dropUpdated(info: DropInfo) -> DropProposal? {
         guard item.isFolder else { return DropProposal(operation: .forbidden) }
-        return DropProposal(operation: isCopyGesture ? .copy : .move)
+        return DropProposal(operation: (isCopyGesture || isOnExternalVolume(item.id)) ? .copy : .move)
     }
-    
+
     func performDrop(info: DropInfo) -> Bool {
         guard item.isFolder else { return false }
         if viewModel.targetedFolderURL == item.id {
             viewModel.targetedFolderURL = nil
         }
-        let copy = isCopyGesture
+        let destination = item.id
         Task {
             let urls = await loadURLs(from: info)
             guard !urls.isEmpty else { return }
+            let copy = isCopyGesture || isOnExternalVolume(destination) || urls.contains(where: { isOnExternalVolume($0) })
             if copy {
-                viewModel.copyPhotos(at: urls, to: item.id, undoManager: undoManager)
+                viewModel.copyPhotos(at: urls, to: destination, undoManager: undoManager)
             } else {
-                viewModel.movePhotos(at: urls, to: item.id, undoManager: undoManager)
+                viewModel.movePhotos(at: urls, to: destination, undoManager: undoManager)
             }
         }
         return true
@@ -1464,16 +1470,16 @@ private struct PhotoGridDropDelegate: DropDelegate {
     }
     
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard viewModel.currentFolder != nil else { return DropProposal(operation: .forbidden) }
-        return DropProposal(operation: isCopyGesture ? .copy : .move)
+        guard let currentFolder = viewModel.currentFolder else { return DropProposal(operation: .forbidden) }
+        return DropProposal(operation: (isCopyGesture || isOnExternalVolume(currentFolder)) ? .copy : .move)
     }
-    
+
     func performDrop(info: DropInfo) -> Bool {
         guard let currentFolder = viewModel.currentFolder else { return false }
-        let copy = isCopyGesture
         Task {
             let urls = await loadURLs(from: info)
             guard !urls.isEmpty else { return }
+            let copy = isCopyGesture || isOnExternalVolume(currentFolder) || urls.contains(where: { isOnExternalVolume($0) })
             if copy {
                 viewModel.copyPhotos(at: urls, to: currentFolder, undoManager: undoManager)
             } else {
