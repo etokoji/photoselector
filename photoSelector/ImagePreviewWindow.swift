@@ -21,20 +21,20 @@ struct ImagePreviewWindowView: View {
                 // Bottom bar with filename and date
                 HStack(spacing: 8) {
                     Text(photo.filename)
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
 
                     if let fileSize = photo.formattedFileSize {
                         Text(fileSize)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
 
                     if let date = viewModel.displayedDate(for: photo) {
                         Text("(\(formatDate(date)))")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
 
                     Spacer()

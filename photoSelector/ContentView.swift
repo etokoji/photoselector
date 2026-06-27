@@ -50,6 +50,10 @@ struct ContentView: View {
         let count = max(1, Int(floor(raw)))
         return count
     }
+
+    private var discardedPhotoCount: Int {
+        viewModel.photos.filter { $0.status == .groupB }.count
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -59,53 +63,24 @@ struct ContentView: View {
 
                 Spacer()
                 
-                // Thumbnail Size Slider
-                HStack(spacing: 8) {
-                    Image(systemName: "photo")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Slider(value: $viewModel.thumbnailSize, in: 100...400, step: 10)
-                        .frame(width: 120)
-                    Image(systemName: "photo")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    
-                    // Clear All Selections Button (right side of slider)
-                    Button(action: {
-                        viewModel.clearAllSelections()
-                    }) {
-                        Label("Clear", systemImage: "xmark.circle")
-                    }
-                    .labelStyle(.titleAndIcon)
-                    .fixedSize()
-                    .disabled(viewModel.photos.isEmpty)
+                Button(action: {
+                    viewModel.clearAllSelections()
+                }) {
+                    Label("Clear Selection", systemImage: "xmark.circle")
                 }
-                .frame(minWidth: 230)
-                
-                Spacer()
-                
-                Text("\(viewModel.currentFolderPhotos.count) Photos")
-                    .foregroundStyle(.secondary)
-                
-                Spacer()
-                
-                // Sort mode picker (local state bridged to ViewModel)
-                Picker("Sort Date", selection: $localSortMode) {
-                    Text("File").tag(DateSortMode.fileCreation)
-                    Text("EXIF").tag(DateSortMode.exifPreferred)
-                }
-                .pickerStyle(.segmented)
-                .frame(minWidth: 200)
-                .help("Sort by file creation date (fast) or EXIF date (slow)")
-                
-                Spacer()
-                
+                .labelStyle(.titleAndIcon)
+                .fixedSize()
+                .disabled(viewModel.photos.isEmpty)
+
                 Button(action: {
                     viewModel.executeMoves(undoManager: undoManager)
                 }) {
-                    Label("Move Discarded (没)", systemImage: "trash")
+                    Label("Move Discarded (没 \(discardedPhotoCount))", systemImage: "trash.fill")
                 }
-                .disabled(viewModel.photos.filter { $0.status == .groupB }.isEmpty || viewModel.isProcessing)
+                .font(.headline)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(discardedPhotoCount == 0 || viewModel.isProcessing)
                 .tint(.red)
             }
             .padding()
@@ -120,7 +95,9 @@ struct ContentView: View {
                     left: PhotoGridView(
                         photos: viewModel.currentFolderPhotos,
                         columns: columns,
-                        thumbnailSize: viewModel.thumbnailSize,
+                        currentFolder: viewModel.currentFolder,
+                        thumbnailSize: $viewModel.thumbnailSize,
+                        sortMode: $localSortMode,
                         primarySelectedPhotoID: $viewModel.primarySelectedPhotoID,
                         selectedPhotoIDs: $viewModel.selectedPhotoIDs,
                         isGridFocused: _isGridFocused,
@@ -1419,7 +1396,9 @@ private struct PhotoGridDropDelegate: DropDelegate {
 struct PhotoGridView: View {
     let photos: [PhotoItem]
     let columns: [GridItem]
-    let thumbnailSize: Double
+    let currentFolder: URL?
+    @Binding var thumbnailSize: Double
+    @Binding var sortMode: DateSortMode
     @Binding var primarySelectedPhotoID: UUID?
     @Binding var selectedPhotoIDs: Set<UUID>
     @FocusState var isGridFocused: Bool
@@ -1432,31 +1411,37 @@ struct PhotoGridView: View {
     
     var body: some View {
         GeometryReader { geometry in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    gridContent
-                    .padding()
-                }
-                .background(isContextActive ? Color.accentColor.opacity(0.1) : Color.clear)
-                .cornerRadius(8)
-                .onAppear {
-                    actualGridWidth = geometry.size.width
-                }
-                .onChange(of: geometry.size.width) { oldValue, newValue in
-                    actualGridWidth = newValue
-                }
-                .onChange(of: primarySelectedPhotoID) { oldValue, newValue in
-                    if let newValue = newValue {
-                        withAnimation {
-                            proxy.scrollTo(newValue, anchor: .center)
+            VStack(spacing: 0) {
+                gridHeader
+
+                Divider()
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        gridContent
+                            .padding()
+                    }
+                    .background(isContextActive ? Color.accentColor.opacity(0.1) : Color.clear)
+                    .cornerRadius(8)
+                    .onAppear {
+                        actualGridWidth = geometry.size.width
+                    }
+                    .onChange(of: geometry.size.width) { oldValue, newValue in
+                        actualGridWidth = newValue
+                    }
+                    .onChange(of: primarySelectedPhotoID) { oldValue, newValue in
+                        if let newValue = newValue {
+                            withAnimation {
+                                proxy.scrollTo(newValue, anchor: .center)
+                            }
                         }
                     }
-                }
 #if os(macOS)
-                .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
-                        delegate: PhotoGridDropDelegate(viewModel: viewModel,
-                                                        undoManager: undoManager))
+                    .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
+                            delegate: PhotoGridDropDelegate(viewModel: viewModel,
+                                                            undoManager: undoManager))
 #endif
+                }
             }
         }
         .focusable()
@@ -1465,6 +1450,62 @@ struct PhotoGridView: View {
         .onAppear {
             isGridFocused = true
         }
+    }
+
+    private var gridHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 24) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("サムネールサイズ")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: $thumbnailSize, in: 100...400, step: 10)
+                        .frame(width: 160)
+                        .accessibilityLabel("サムネールサイズ")
+                }
+
+                HStack(spacing: 8) {
+                    Text("ソート方法")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("ソート方法", selection: $sortMode) {
+                        Text("ファイル日付順").tag(DateSortMode.fileCreation)
+                        Text("EXIF日付順").tag(DateSortMode.exifPreferred)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                    .help("表示順の基準を選択")
+                }
+            }
+
+            HStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Text(currentFolder?.path ?? "フォルダ未選択")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(currentFolder?.path ?? "フォルダ未選択")
+                }
+
+                Spacer(minLength: 12)
+
+                Text("\(photos.count) Photos")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Material.bar)
     }
 
     var gridContent: some View {
@@ -2062,14 +2103,14 @@ struct SelectedPhotoPreview: View {
 
                         if let fileSize = photo.formattedFileSize {
                             Text(fileSize)
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         
                         if let date = viewModel.displayedDate(for: photo) {
                             Text(formatDate(date))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         
                         Spacer()
