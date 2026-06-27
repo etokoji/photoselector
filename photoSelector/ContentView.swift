@@ -2381,15 +2381,11 @@ private struct PreviewImageView: View {
     }
 
     var body: some View {
-        Group {
+        ZStack {
             if let image {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-            } else if isLoading {
-                Rectangle()
-                    .fill(Color.gray.opacity(0.2))
-                    .overlay(ProgressView())
             } else if didFail {
                 VStack {
                     Image(systemName: "exclamationmark.triangle")
@@ -2403,6 +2399,10 @@ private struct PreviewImageView: View {
                 Rectangle()
                     .fill(Color.gray.opacity(0.2))
             }
+
+            if isLoading {
+                ProgressView()
+            }
         }
         .task(id: PreviewImageRequest(url: url, size: thumbnailSize)) {
             await loadImage()
@@ -2411,7 +2411,6 @@ private struct PreviewImageView: View {
 
     @MainActor
     private func loadImage() async {
-        image = nil
         didFail = false
         isLoading = true
 
