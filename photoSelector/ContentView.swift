@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import ImageIO
+import Darwin
 
 struct ContentView: View {
     @StateObject private var viewModel = PhotoSorterViewModel()
@@ -54,6 +55,8 @@ struct ContentView: View {
         VStack(spacing: 0) {
             // Toolbar Area
             HStack {
+                MemoryUsageView()
+
                 Spacer()
                 
                 // Thumbnail Size Slider
@@ -371,6 +374,69 @@ struct ContentView: View {
 
         previewWindow = window
         previewWindowDelegate = windowDelegate
+    }
+}
+
+private struct MemoryUsageView: View {
+    @State private var usage = AppMemoryUsage.current
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "memorychip")
+                .font(.caption)
+            Text(usage.formatted)
+                .font(.caption.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.7), in: Capsule())
+        .help("Current memory usage")
+        .task {
+            while !Task.isCancelled {
+                usage = AppMemoryUsage.current
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+}
+
+private struct AppMemoryUsage {
+    let residentBytes: UInt64?
+
+    var formatted: String {
+        guard let residentBytes else {
+            return "RAM --"
+        }
+
+        let megabytes = Double(residentBytes) / 1_048_576
+        if megabytes >= 1_024 {
+            return String(format: "RAM %.1f GB", megabytes / 1_024)
+        } else {
+            return String(format: "RAM %.0f MB", megabytes)
+        }
+    }
+
+    static var current: AppMemoryUsage {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
+                task_info(
+                    mach_task_self_,
+                    task_flavor_t(MACH_TASK_BASIC_INFO),
+                    reboundPointer,
+                    &count
+                )
+            }
+        }
+
+        guard result == KERN_SUCCESS else {
+            return AppMemoryUsage(residentBytes: nil)
+        }
+
+        return AppMemoryUsage(residentBytes: UInt64(info.resident_size))
     }
 }
 
