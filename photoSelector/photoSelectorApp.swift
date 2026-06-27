@@ -9,6 +9,18 @@ import SwiftUI
 import AppKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var editMenuObserver: NSObjectProtocol?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        configureEditMenu()
+        DispatchQueue.main.async { self.configureEditMenu() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.configureEditMenu() }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        configureEditMenu()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let alert = NSAlert()
         alert.messageText = "photoSelectorを終了しますか？"
@@ -17,6 +29,77 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.buttons[1].keyEquivalent = "\u{1b}"
         alert.alertStyle = .warning
         return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+
+    private func configureEditMenu() {
+        guard let editMenu = NSApp.mainMenu?.items.first(where: { $0.title == "Edit" || $0.title == "編集" })?.submenu else {
+            return
+        }
+
+        if #available(macOS 15.2, *) {
+            editMenu.automaticallyInsertsWritingToolsItems = false
+        }
+
+        removeUnwantedEditMenuItems(from: editMenu)
+        observeEditMenuChanges(editMenu)
+    }
+
+    private func observeEditMenuChanges(_ editMenu: NSMenu) {
+        if editMenuObserver != nil { return }
+
+        editMenuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didAddItemNotification,
+            object: editMenu,
+            queue: .main
+        ) { [weak self, weak editMenu] _ in
+            guard let editMenu else { return }
+            self?.removeUnwantedEditMenuItems(from: editMenu)
+        }
+    }
+
+    private func removeUnwantedEditMenuItems(from editMenu: NSMenu) {
+        for index in editMenu.items.indices.reversed() {
+            let item = editMenu.items[index]
+            if shouldRemoveFromEditMenu(item) {
+                editMenu.removeItem(at: index)
+            }
+        }
+
+        removeExtraSeparators(from: editMenu)
+    }
+
+    private func shouldRemoveFromEditMenu(_ item: NSMenuItem) -> Bool {
+        if item.isSeparatorItem { return false }
+
+        let title = item.title.lowercased()
+        let actionName = item.action.map(NSStringFromSelector)?.lowercased() ?? ""
+        let identifier = item.identifier?.rawValue.lowercased() ?? ""
+        let searchableText = [title, actionName, identifier].joined(separator: " ")
+
+        return searchableText.contains("作文ツール")
+            || searchableText.contains("writing tools")
+            || searchableText.contains("writingtools")
+            || searchableText.contains("自動入力")
+            || searchableText.contains("autofill")
+            || searchableText.contains("音声入力")
+            || searchableText.contains("dictation")
+            || searchableText.contains("絵文字と記号")
+            || searchableText.contains("emoji & symbols")
+            || searchableText.contains("characterpalette")
+    }
+
+    private func removeExtraSeparators(from menu: NSMenu) {
+        while menu.items.first?.isSeparatorItem == true {
+            menu.removeItem(at: 0)
+        }
+
+        while menu.items.last?.isSeparatorItem == true {
+            menu.removeItem(at: menu.items.count - 1)
+        }
+
+        for index in menu.items.indices.dropFirst().reversed() where menu.items[index].isSeparatorItem && menu.items[index - 1].isSeparatorItem {
+            menu.removeItem(at: index)
+        }
     }
 }
 
