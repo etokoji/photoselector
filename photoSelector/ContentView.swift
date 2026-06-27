@@ -1966,7 +1966,7 @@ struct SelectedPhotoPreview: View {
             // Preview Content
             if let photo = photo {
                 GeometryReader { geometry in
-                    PreviewImageView(url: photo.url)
+                    PreviewImageView(url: photo.url, displaySize: geometry.size)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
@@ -2044,9 +2044,16 @@ struct SelectedPhotoPreview: View {
 
 private struct PreviewImageView: View {
     let url: URL
+    let displaySize: CGSize
     @State private var image: NSImage?
     @State private var isLoading = false
     @State private var didFail = false
+
+    private var thumbnailSize: CGFloat {
+        let maxDimension = max(displaySize.width, displaySize.height)
+        guard maxDimension.isFinite, maxDimension > 0 else { return 640 }
+        return max(160, ceil(maxDimension / 64) * 64)
+    }
 
     var body: some View {
         Group {
@@ -2072,7 +2079,7 @@ private struct PreviewImageView: View {
                     .fill(Color.gray.opacity(0.2))
             }
         }
-        .task(id: url) {
+        .task(id: PreviewImageRequest(url: url, size: thumbnailSize)) {
             await loadImage()
         }
     }
@@ -2083,19 +2090,17 @@ private struct PreviewImageView: View {
         didFail = false
         isLoading = true
 
-        let loadedImage = await Task.detached(priority: .userInitiated) {
-            autoreleasepool {
-                guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
-                    return nil as NSImage?
-                }
-                return NSImage(data: data)
-            }
-        }.value
+        let loadedImage = await ThumbnailGenerator.shared.thumbnail(for: url, size: thumbnailSize)
 
         guard !Task.isCancelled else { return }
         image = loadedImage
         didFail = loadedImage == nil
         isLoading = false
+    }
+
+    private struct PreviewImageRequest: Hashable {
+        let url: URL
+        let size: CGFloat
     }
 }
 

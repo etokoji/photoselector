@@ -75,6 +75,14 @@ class ThumbnailGenerator {
             }
         }
     }
+
+    func thumbnail(for url: URL, size: CGFloat) async -> NSImage? {
+        await withCheckedContinuation { continuation in
+            thumbnail(for: url, size: size) { image in
+                continuation.resume(returning: image)
+            }
+        }
+    }
 }
 
 
