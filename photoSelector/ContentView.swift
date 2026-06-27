@@ -211,13 +211,13 @@ struct ContentView: View {
                 return .handled
             }
             .onKeyPress(.space) {
-                // Space: Toggle status
-                viewModel.toggleSelectedPhotoStatus(deferred: true)
+                // Space: Toggle preview window
+                togglePreviewWindow()
                 return .handled
             }
             .onKeyPress(.return) {
-                // Enter: Show full screen preview
-                showImagePreview = true
+                // Enter: Toggle preview window
+                togglePreviewWindow()
                 return .handled
             }
             .onKeyPress(KeyEquivalent("a"), phases: .down) { press in
@@ -339,6 +339,16 @@ struct ContentView: View {
                 viewModel.openFolderPane(from: url)
             }
         }
+    }
+
+    private func togglePreviewWindow() {
+        if let window = previewWindow {
+            window.close()
+            return
+        }
+
+        guard viewModel.selectedPhoto != nil else { return }
+        showImagePreview = true
     }
     
     func openPreviewWindow(for photo: PhotoItem) {

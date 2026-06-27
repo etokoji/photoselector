@@ -62,7 +62,7 @@ struct ImagePreviewWindowView: View {
                     Image(systemName: "xmark.circle")
                 }
                 .keyboardShortcut("w", modifiers: .command)
-                .help("Close (⌘W or Enter)")
+                .help("Close (⌘W, Enter, or Space)")
             }
         }
     }
@@ -109,11 +109,11 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
-        // Only monitor Enter/Return to close the preview window.
+        // Monitor keys that should close the preview window even when the image view has focus.
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
             guard let self = self, let window = window else { return event }
             if event.window == window {
-                if event.keyCode == 36 || event.keyCode == 76 {
+                if event.keyCode == 36 || event.keyCode == 49 || event.keyCode == 76 {
                     self.invokeOnCloseIfNeeded()
                     window.close()
                     return nil
