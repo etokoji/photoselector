@@ -56,8 +56,7 @@ struct ImagePreviewWindowView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button(action: {
-                    onClose()
-                    NSApp.keyWindow?.close()
+                    NSApp.keyWindow?.performClose(nil)
                 }) {
                     Image(systemName: "xmark.circle")
                 }
@@ -96,26 +95,33 @@ class PreviewWindowSizeManager {
 // MARK: - Window Delegate
 
 class PreviewWindowDelegate: NSObject, NSWindowDelegate {
+    private let closingTargetFrame: () -> NSRect?
     private let onClose: () -> Void
     private var localMonitor: Any?
     private weak var mainWindow: NSWindow?
     private var didInvokeOnClose = false
+    private var isAnimatingClose = false
+    private var isClosingAfterAnimation = false
 
-    init(onClose: @escaping () -> Void, mainWindow: NSWindow?) {
+    init(
+        onClose: @escaping () -> Void,
+        mainWindow: NSWindow?,
+        closingTargetFrame: @escaping () -> NSRect? = { nil }
+    ) {
         self.onClose = onClose
         self.mainWindow = mainWindow
+        self.closingTargetFrame = closingTargetFrame
         super.init()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         // Monitor keys that should close the preview window even when the image view has focus.
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
-            guard let self = self, let window = window else { return event }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak window] event in
+            guard let window = window else { return event }
             if event.window == window {
                 if event.keyCode == 36 || event.keyCode == 49 || event.keyCode == 76 {
-                    self.invokeOnCloseIfNeeded()
-                    window.close()
+                    window.performClose(nil)
                     return nil
                 }
             }
@@ -131,9 +137,50 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
         invokeOnCloseIfNeeded()
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isClosingAfterAnimation else { return true }
+        guard !isAnimatingClose else { return false }
+        animateClose(sender)
+        return false
+    }
+
     func windowDidResize(_ notification: Notification) {
+        guard !isAnimatingClose, !isClosingAfterAnimation else { return }
         guard let window = notification.object as? NSWindow else { return }
         PreviewWindowSizeManager.shared.saveWindowSize(window.frame.size)
+    }
+
+    private func animateClose(_ window: NSWindow) {
+        isAnimatingClose = true
+        let finalFrame = closingTargetFrame().map { closingWindowFinalFrame(to: $0, from: window.frame) }
+        let duration = finalFrame == nil ? 0.22 : 0.32
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            window.animator().alphaValue = finalFrame == nil ? 0 : 0.45
+            if let finalFrame {
+                window.animator().setFrame(finalFrame, display: true)
+            }
+        } completionHandler: { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.isAnimatingClose = false
+            self.isClosingAfterAnimation = true
+            window.close()
+        }
+    }
+
+    private func closingWindowFinalFrame(to targetFrame: NSRect, from sourceFrame: NSRect) -> NSRect {
+        let minimumSize: CGFloat = 96
+        let scale = max(minimumSize / max(targetFrame.width, targetFrame.height, 1), 1)
+        let width = min(max(targetFrame.width * scale, minimumSize), sourceFrame.width * 0.35)
+        let height = min(max(targetFrame.height * scale, minimumSize), sourceFrame.height * 0.35)
+        return NSRect(
+            x: targetFrame.midX - width / 2,
+            y: targetFrame.midY - height / 2,
+            width: width,
+            height: height
+        )
     }
 
     private func invokeOnCloseIfNeeded() {

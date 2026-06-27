@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var actualGridWidth: CGFloat = 800
     @State private var previewWindow: NSWindow?
     @State private var previewWindowDelegate: PreviewWindowDelegate?
+    @State private var selectedThumbnailScreenFrame: NSRect?
     // Bridge state to avoid publishing during view updates
     @State private var localSortMode: DateSortMode = .fileCreation
     @State private var folderPanelsAreVertical = false
@@ -102,6 +103,7 @@ struct ContentView: View {
                         selectedPhotoIDs: $viewModel.selectedPhotoIDs,
                         isGridFocused: _isGridFocused,
                         actualGridWidth: $actualGridWidth,
+                        selectedThumbnailScreenFrame: $selectedThumbnailScreenFrame,
                         onSelect: { id, orderedIDs, isCommand, isShift, context in
                             viewModel.applySelectionClick(
                                 id: id,
@@ -320,7 +322,7 @@ struct ContentView: View {
 
     private func togglePreviewWindow() {
         if let window = previewWindow {
-            window.close()
+            window.performClose(nil)
             return
         }
 
@@ -334,10 +336,14 @@ struct ContentView: View {
         })
         let hostingController = NSHostingController(rootView: previewView)
 
-        let windowDelegate = PreviewWindowDelegate(onClose: {
-            showImagePreview = false
-            self.previewWindow = nil // Clear reference on close
-        }, mainWindow: NSApp.mainWindow)
+        let windowDelegate = PreviewWindowDelegate(
+            onClose: {
+                showImagePreview = false
+                self.previewWindow = nil // Clear reference on close
+            },
+            mainWindow: NSApp.mainWindow,
+            closingTargetFrame: { self.selectedThumbnailScreenFrame }
+        )
 
         if let window = previewWindow {
             window.contentViewController = hostingController
@@ -357,10 +363,42 @@ struct ContentView: View {
         window.center()
 
         window.delegate = windowDelegate
-        window.makeKeyAndOrderFront(nil)
+        animatePreviewWindowOpen(window, from: selectedThumbnailScreenFrame)
 
         previewWindow = window
         previewWindowDelegate = windowDelegate
+    }
+
+    private func animatePreviewWindowOpen(_ window: NSWindow, from sourceFrame: NSRect?) {
+        let finalFrame = window.frame
+        let initialFrame = sourceFrame.map { previewWindowInitialFrame(from: $0, finalFrame: finalFrame) }
+            ?? finalFrame.insetBy(dx: finalFrame.width * 0.025, dy: finalFrame.height * 0.025)
+
+        window.alphaValue = sourceFrame == nil ? 0 : 0.25
+        window.setFrame(initialFrame, display: false)
+        window.makeKeyAndOrderFront(nil)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = sourceFrame == nil ? 0.22 : 0.5
+            context.timingFunction = sourceFrame == nil
+                ? CAMediaTimingFunction(name: .easeOut)
+                : CAMediaTimingFunction(controlPoints: 0.42, 0.0, 0.2, 1.0)
+            window.animator().alphaValue = 1
+            window.animator().setFrame(finalFrame, display: true)
+        }
+    }
+
+    private func previewWindowInitialFrame(from sourceFrame: NSRect, finalFrame: NSRect) -> NSRect {
+        let minimumSize: CGFloat = 72
+        let scale = max(minimumSize / max(sourceFrame.width, sourceFrame.height, 1), 1)
+        let width = min(max(sourceFrame.width * scale, minimumSize), finalFrame.width * 0.25)
+        let height = min(max(sourceFrame.height * scale, minimumSize), finalFrame.height * 0.25)
+        return NSRect(
+            x: sourceFrame.midX - width / 2,
+            y: sourceFrame.midY - height / 2,
+            width: width,
+            height: height
+        )
     }
 }
 
@@ -738,6 +776,7 @@ private let sidebarDefaultFolderPaneHeight: CGFloat = 220
 private let sidebarDefaultExifPaneHeight: CGFloat = 180
 private let sidebarPaneDividerHeight: CGFloat = 1
 private let sidebarMinimumResizeDelta: CGFloat = 0.2
+private let sidebarPaneCollapseAnimation = Animation.easeOut(duration: 0.16)
 private let sidebarPaneTitleBackground = Color.accentColor.opacity(0.12)
 private var sidebarTooltipBackgroundColor: Color {
     Color(nsColor: NSColor(name: nil) { appearance in
@@ -759,6 +798,7 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
     @ViewBuilder let content: Content
     @State private var lastDragTranslation: CGFloat = 0
     @State private var isDraggingTitle = false
+    @State private var animatesHeightChange = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -772,7 +812,9 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
         .frame(height: max(height, sidebarMinimumPaneHeight))
         .background(Color(nsColor: .controlBackgroundColor))
         .transaction { transaction in
-            transaction.animation = nil
+            if !animatesHeightChange {
+                transaction.animation = nil
+            }
         }
     }
     
@@ -828,7 +870,13 @@ struct SidebarResizablePane<Tools: View, Content: View>: View {
         guard isResizeEnabled else { return }
         let dragDelta = max(0, height - sidebarMinimumPaneHeight)
         guard dragDelta >= sidebarMinimumResizeDelta else { return }
-        onResize(dragDelta)
+        animatesHeightChange = true
+        withAnimation(sidebarPaneCollapseAnimation) {
+            onResize(dragDelta)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            animatesHeightChange = false
+        }
     }
 }
 
@@ -1403,6 +1451,7 @@ struct PhotoGridView: View {
     @Binding var selectedPhotoIDs: Set<UUID>
     @FocusState var isGridFocused: Bool
     @Binding var actualGridWidth: CGFloat
+    @Binding var selectedThumbnailScreenFrame: NSRect?
     let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var isContextActive: Bool = false
@@ -1537,6 +1586,85 @@ struct PhotoGridView: View {
             let isCommand = flags.contains(.command)
             let isShift = flags.contains(.shift)
             onSelect(photo.id, photos.map { $0.id }, isCommand, isShift, .grid)
+        }
+        .background {
+            if primarySelectedPhotoID == photo.id {
+                ScreenFrameReporter { frame in
+                    selectedThumbnailScreenFrame = frame
+                }
+            }
+        }
+    }
+}
+
+private struct ScreenFrameReporter: NSViewRepresentable {
+    let onChange: (NSRect?) -> Void
+
+    func makeNSView(context: Context) -> ReportingView {
+        let view = ReportingView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: ReportingView, context: Context) {
+        nsView.onChange = onChange
+        nsView.reportFrame()
+    }
+
+    final class ReportingView: NSView {
+        var onChange: ((NSRect?) -> Void)?
+        private var boundsObserver: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateBoundsObserver()
+            reportFrame()
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            updateBoundsObserver()
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            reportFrame()
+        }
+
+        deinit {
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+        }
+
+        private func updateBoundsObserver() {
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+                self.boundsObserver = nil
+            }
+
+            guard let clipView = enclosingScrollView?.contentView else { return }
+            clipView.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: clipView,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reportFrame()
+            }
+        }
+
+        func reportFrame() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard let window else {
+                    onChange?(nil)
+                    return
+                }
+
+                let windowFrame = convert(bounds, to: nil)
+                onChange?(window.convertToScreen(windowFrame))
+            }
         }
     }
 }
