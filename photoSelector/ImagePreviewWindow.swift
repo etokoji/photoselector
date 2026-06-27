@@ -153,7 +153,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
     private func animateClose(_ window: NSWindow) {
         isAnimatingClose = true
         let finalFrame = closingTargetFrame().map { closingWindowFinalFrame(to: $0, from: window.frame) }
-        let duration = finalFrame == nil ? 0.22 : 0.32
+        let duration = finalFrame == nil ? 0.18 : 0.24
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = duration

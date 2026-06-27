@@ -21,10 +21,10 @@ struct ContentView: View {
     @State private var selectedThumbnailScreenFrame: NSRect?
     // Bridge state to avoid publishing during view updates
     @State private var localSortMode: DateSortMode = .fileCreation
-    @State private var folderPanelsAreVertical = false
     @State private var windowID = UUID().uuidString
     @State private var didApplyLayoutDefaults = false
     @State private var initialWindowSize: CGSize?
+    @State private var defaultSidebarExifPaneHeight: CGFloat?
     @Environment(\.undoManager) private var undoManager
     
     // Monitor for Option key state
@@ -91,7 +91,10 @@ struct ContentView: View {
 #if os(macOS)
             // Nested SplitView for 3-pane layout (left sidebar + content)
             SplitViewRepresentable(
-                left: FolderPanelsContainer(onOpenFolder: selectFolder),
+                left: FolderPanelsContainer(
+                    onOpenFolder: selectFolder,
+                    exifPaneHeight: $defaultSidebarExifPaneHeight
+                ),
                 right: SplitViewRepresentable(
                     left: PhotoGridView(
                         photos: viewModel.currentFolderPhotos,
@@ -283,9 +286,9 @@ struct ContentView: View {
         .focusedValue(\.saveWindowLayoutDefaults) {
             WindowLayoutDefaults.saveCurrentLayout(
                 windowID: windowID,
-                folderPanelsAreVertical: folderPanelsAreVertical,
                 thumbnailSize: viewModel.thumbnailSize,
                 sortMode: viewModel.sortMode,
+                sidebarExifPaneHeight: defaultSidebarExifPaneHeight,
                 windowSize: WindowLayoutDefaults.mainWindowContentSize(from: NSApp.keyWindow)
             )
         }
@@ -300,10 +303,10 @@ struct ContentView: View {
         guard !didApplyLayoutDefaults else { return }
         didApplyLayoutDefaults = true
         guard let settings = WindowLayoutDefaults.applyLayout(to: windowID) else { return }
-        folderPanelsAreVertical = settings.folderPanelsAreVertical
         viewModel.applyWindowLayoutSettings(settings)
         localSortMode = settings.sortMode
         initialWindowSize = settings.windowSize
+        defaultSidebarExifPaneHeight = settings.sidebarExifPaneHeight
     }
 #endif
     
@@ -469,9 +472,9 @@ private struct AppMemoryUsage {
 
 struct FolderPanelsContainer: View {
     let onOpenFolder: () -> Void
+    @Binding var exifPaneHeight: CGFloat?
     @EnvironmentObject private var viewModel: PhotoSorterViewModel
     @State private var folderPaneHeights: [UUID: CGFloat] = [:]
-    @State private var exifPaneHeight: CGFloat = sidebarDefaultExifPaneHeight
 
     var body: some View {
         VStack(spacing: 0) {
@@ -479,20 +482,22 @@ struct FolderPanelsContainer: View {
             Divider()
             GeometryReader { geometry in
                 let exifHeight = currentExifDisplayHeight(availableHeight: geometry.size.height)
+                let folderListHeight = folderPaneListHeight(availableHeight: geometry.size.height, exifHeight: exifHeight)
                 VStack(spacing: 0) {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(viewModel.folderPanes.enumerated()), id: \.element.id) { index, pane in
                             SidebarResizablePane(
                                 title: panelTitle(for: pane),
                                 systemImage: "folder",
-                                height: heightBinding(for: pane.id),
+                                height: heightBinding(for: pane.id, defaultHeight: defaultFolderPaneHeight(folderListHeight: folderListHeight)),
                                 isResizeEnabled: index > 0,
                                 onResize: {
                                     resizeFolderPane(
                                         pane.id,
                                         by: $0,
                                         availableHeight: geometry.size.height,
-                                        exifHeight: exifHeight
+                                        exifHeight: exifHeight,
+                                        defaultHeight: defaultFolderPaneHeight(folderListHeight: folderListHeight)
                                     )
                                 },
                                 tools: {
@@ -542,7 +547,7 @@ struct FolderPanelsContainer: View {
                         }
                     }
                     .frame(
-                        height: folderPaneListHeight(availableHeight: geometry.size.height, exifHeight: exifHeight),
+                        height: folderListHeight,
                         alignment: .top
                     )
                     
@@ -556,6 +561,7 @@ struct FolderPanelsContainer: View {
                         onResize: {
                             resizeExifPane(
                                 by: $0,
+                                availableHeight: geometry.size.height,
                                 currentDisplayedHeight: exifHeight
                             )
                         },
@@ -565,11 +571,15 @@ struct FolderPanelsContainer: View {
                         ExifInfoPanel()
                     }
                 }
+                .onAppear {
+                    applyDefaultFolderPaneHeights(folderListHeight: folderListHeight)
+                }
                 .onChange(of: viewModel.folderPanes.map(\.id)) { oldValue, newValue in
                     guard newValue.count > oldValue.count,
                           let newPaneID = newValue.last
                     else { return }
                     DispatchQueue.main.async {
+                        applyDefaultFolderPaneHeights(folderListHeight: folderListHeight)
                         makeRoomForNewFolderPane(
                             newPaneID,
                             availableHeight: geometry.size.height,
@@ -611,7 +621,9 @@ struct FolderPanelsContainer: View {
     }
     
     private func currentExifDisplayHeight(availableHeight: CGFloat) -> CGFloat {
-        max(sidebarMinimumPaneHeight, max(exifPaneHeight, availableHeight - folderPanesDisplayedHeight))
+        let preferredHeight = exifPaneHeight ?? availableHeight / 3
+        let maximumHeight = max(sidebarMinimumPaneHeight, availableHeight - sidebarMinimumPaneHeight)
+        return min(max(sidebarMinimumPaneHeight, preferredHeight), maximumHeight)
     }
     
     private var folderPanesDisplayedHeight: CGFloat {
@@ -625,15 +637,35 @@ struct FolderPanelsContainer: View {
         max(0, availableHeight - exifHeight)
     }
     
-    private func heightBinding(for id: UUID) -> Binding<CGFloat> {
+    private func defaultFolderPaneHeight(folderListHeight: CGFloat) -> CGFloat {
+        let paneCount = max(viewModel.folderPanes.count, 1)
+        let dividerHeight = CGFloat(paneCount) * sidebarPaneDividerHeight
+        let availableHeight = max(0, folderListHeight - dividerHeight)
+        return max(sidebarMinimumPaneHeight, availableHeight / CGFloat(paneCount))
+    }
+    
+    private func applyDefaultFolderPaneHeights(folderListHeight: CGFloat) {
+        let defaultHeight = defaultFolderPaneHeight(folderListHeight: folderListHeight)
+        for pane in viewModel.folderPanes where folderPaneHeights[pane.id] == nil {
+            folderPaneHeights[pane.id] = defaultHeight
+        }
+    }
+    
+    private func heightBinding(for id: UUID, defaultHeight: CGFloat) -> Binding<CGFloat> {
         Binding(
-            get: { folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight },
+            get: { folderPaneHeights[id] ?? defaultHeight },
             set: { folderPaneHeights[id] = $0 }
         )
     }
     
-    private func resizeFolderPane(_ id: UUID, by dragDelta: CGFloat, availableHeight: CGFloat, exifHeight: CGFloat) {
-        let currentHeight = folderPaneHeights[id] ?? sidebarDefaultFolderPaneHeight
+    private func resizeFolderPane(
+        _ id: UUID,
+        by dragDelta: CGFloat,
+        availableHeight: CGFloat,
+        exifHeight: CGFloat,
+        defaultHeight: CGFloat
+    ) {
+        let currentHeight = folderPaneHeights[id] ?? defaultHeight
         let clampedDelta = clampedFolderPaneDragDelta(
             dragDelta,
             paneID: id,
@@ -708,10 +740,12 @@ struct FolderPanelsContainer: View {
         folderPaneHeights[newPaneID] = max(sidebarMinimumPaneHeight, newHeight - overflow)
     }
     
-    private func resizeExifPane(by dragDelta: CGFloat, currentDisplayedHeight: CGFloat) {
+    private func resizeExifPane(by dragDelta: CGFloat, availableHeight: CGFloat, currentDisplayedHeight: CGFloat) {
         let clampedDelta = clampedTopBoundaryDelta(dragDelta, currentHeight: currentDisplayedHeight)
         let actualDelta = adjustedDeltaForPreviousPane(before: .exif, proposedDelta: clampedDelta)
-        exifPaneHeight = max(sidebarMinimumPaneHeight, currentDisplayedHeight - actualDelta)
+        let newExifHeight = max(sidebarMinimumPaneHeight, currentDisplayedHeight - actualDelta)
+        exifPaneHeight = newExifHeight
+        fitFolderPanes(to: folderPaneListHeight(availableHeight: availableHeight, exifHeight: newExifHeight))
     }
     
     private func clampedTopBoundaryDelta(_ proposedDelta: CGFloat, currentHeight: CGFloat) -> CGFloat {
@@ -738,14 +772,54 @@ struct FolderPanelsContainer: View {
             }
         case .exif:
             if proposedDelta > 0 {
-                exifPaneHeight += proposedDelta
+                exifPaneHeight = currentExifDisplayHeightForAdjustment + proposedDelta
                 return proposedDelta
             } else {
-                let availableShrink = max(0, exifPaneHeight - sidebarMinimumPaneHeight)
+                let currentHeight = currentExifDisplayHeightForAdjustment
+                let availableShrink = max(0, currentHeight - sidebarMinimumPaneHeight)
                 let actualDelta = -min(-proposedDelta, availableShrink)
-                exifPaneHeight += actualDelta
+                exifPaneHeight = currentHeight + actualDelta
                 return actualDelta
             }
+        }
+    }
+
+    private var currentExifDisplayHeightForAdjustment: CGFloat {
+        exifPaneHeight ?? sidebarDefaultExifPaneHeight
+    }
+
+    private func fitFolderPanes(to folderListHeight: CGFloat) {
+        guard !viewModel.folderPanes.isEmpty else { return }
+
+        let targetTotal = max(0, folderListHeight - CGFloat(viewModel.folderPanes.count) * sidebarPaneDividerHeight)
+        let currentTotal = viewModel.folderPanes.reduce(CGFloat(0)) { total, pane in
+            total + max(folderPaneHeights[pane.id] ?? sidebarMinimumPaneHeight, sidebarMinimumPaneHeight)
+        }
+        let delta = targetTotal - currentTotal
+        guard abs(delta) > 0.5 else { return }
+
+        if delta > 0 {
+            growLastExpandedFolderPane(by: delta)
+        } else {
+            shrinkFolderPanes(by: -delta)
+        }
+    }
+
+    private func growLastExpandedFolderPane(by delta: CGFloat) {
+        guard let pane = viewModel.folderPanes.last else { return }
+        let currentHeight = max(folderPaneHeights[pane.id] ?? sidebarMinimumPaneHeight, sidebarMinimumPaneHeight)
+        folderPaneHeights[pane.id] = currentHeight + delta
+    }
+
+    private func shrinkFolderPanes(by delta: CGFloat) {
+        var remaining = delta
+        for pane in viewModel.folderPanes.reversed() {
+            guard remaining > 0 else { return }
+            let currentHeight = max(folderPaneHeights[pane.id] ?? sidebarMinimumPaneHeight, sidebarMinimumPaneHeight)
+            let shrink = min(remaining, max(0, currentHeight - sidebarMinimumPaneHeight))
+            guard shrink > 0 else { continue }
+            folderPaneHeights[pane.id] = currentHeight - shrink
+            remaining -= shrink
         }
     }
     

@@ -13,9 +13,9 @@ extension Notification.Name {
 }
 
 struct WindowLayoutSettings: Equatable {
-    var folderPanelsAreVertical: Bool
     var thumbnailSize: Double
     var sortMode: DateSortMode
+    var sidebarExifPaneHeight: CGFloat?
     var windowWidth: CGFloat?
     var windowHeight: CGFloat?
     
@@ -65,27 +65,27 @@ enum WindowLayoutDefaults {
     
     static func saveCurrentLayout(
         windowID: String,
-        folderPanelsAreVertical: Bool,
         thumbnailSize: Double,
         sortMode: DateSortMode,
+        sidebarExifPaneHeight: CGFloat? = nil,
         windowSize: CGSize? = nil
     ) {
         NotificationCenter.default.post(name: .forcePersistSplitPositions, object: nil)
         
         DispatchQueue.main.async {
             persist(windowID: windowID,
-                    folderPanelsAreVertical: folderPanelsAreVertical,
                     thumbnailSize: thumbnailSize,
                     sortMode: sortMode,
+                    sidebarExifPaneHeight: sidebarExifPaneHeight,
                     windowSize: windowSize)
         }
     }
     
     private static func persist(
         windowID: String,
-        folderPanelsAreVertical: Bool,
         thumbnailSize: Double,
         sortMode: DateSortMode,
+        sidebarExifPaneHeight: CGFloat?,
         windowSize: CGSize?
     ) {
         let defaults = UserDefaults.standard
@@ -97,9 +97,11 @@ enum WindowLayoutDefaults {
             }
         }
         
-        defaults.set(folderPanelsAreVertical, forKey: "\(prefix)_FolderPanelsAreVertical")
         defaults.set(thumbnailSize, forKey: "\(prefix)_ThumbnailSize")
         defaults.set(sortMode.rawValue, forKey: "\(prefix)_DateSortMode")
+        if let sidebarExifPaneHeight, sidebarExifPaneHeight > 0 {
+            defaults.set(Double(sidebarExifPaneHeight), forKey: "\(prefix)_SidebarExifPaneHeight")
+        }
         if let windowSize, windowSize.width > 0, windowSize.height > 0 {
             defaults.set(Double(windowSize.width), forKey: "\(prefix)_WindowWidth")
             defaults.set(Double(windowSize.height), forKey: "\(prefix)_WindowHeight")
@@ -119,17 +121,17 @@ enum WindowLayoutDefaults {
             }
         }
         
-        let folderPanelsAreVertical = defaults.bool(forKey: "\(prefix)_FolderPanelsAreVertical")
         let thumbnailSize = defaults.double(forKey: "\(prefix)_ThumbnailSize")
         let sortModeRaw = defaults.string(forKey: "\(prefix)_DateSortMode") ?? DateSortMode.fileCreation.rawValue
         let sortMode = DateSortMode(rawValue: sortModeRaw) ?? .fileCreation
+        let sidebarExifPaneHeight = defaults.double(forKey: "\(prefix)_SidebarExifPaneHeight")
         let windowWidth = defaults.double(forKey: "\(prefix)_WindowWidth")
         let windowHeight = defaults.double(forKey: "\(prefix)_WindowHeight")
         
         return WindowLayoutSettings(
-            folderPanelsAreVertical: folderPanelsAreVertical,
             thumbnailSize: thumbnailSize > 0 ? thumbnailSize : 150,
             sortMode: sortMode,
+            sidebarExifPaneHeight: sidebarExifPaneHeight > 0 ? sidebarExifPaneHeight : nil,
             windowWidth: windowWidth > 0 ? windowWidth : nil,
             windowHeight: windowHeight > 0 ? windowHeight : nil
         )
