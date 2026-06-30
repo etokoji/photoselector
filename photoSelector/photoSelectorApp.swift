@@ -124,7 +124,7 @@ private enum AppearanceMode: String {
 struct photoSelectorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.system.rawValue
-    @FocusedObject private var viewModel: PhotoSorterViewModel?
+    @FocusedValue(\.viewModel) private var viewModel: PhotoSorterViewModel?
     @FocusedValue(\.saveWindowLayoutDefaults) private var saveWindowLayoutDefaults
 
     init() {

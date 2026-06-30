@@ -6,72 +6,81 @@
 //
 
 import SwiftUI
-import Combine
+import Observation
 import ImageIO
 #if os(macOS)
 import AppKit
 #endif
 
 // MARK: - Thumbnail Generator
+nonisolated private struct ThumbnailRequestKey: Hashable, Sendable {
+    let url: URL
+    let pixelSize: Int
+}
+
 class ThumbnailGenerator {
     static let shared = ThumbnailGenerator()
-    
-    private class CacheKey: NSObject {
-        let url: URL
-        let size: CGFloat
 
-        init(url: URL, size: CGFloat) {
-            self.url = url
-            self.size = size
-        }
+    // Thumbnail loading is shared by the grid and preview window. The cache keeps
+    // generated thumbnails in memory, while latestThumbnailByURL lets the preview
+    // show an already visible grid thumbnail immediately before any SD card read.
+    private let cache = NSCache<NSString, NSImage>()
+    private let generationQueue: OperationQueue
+    private let stateQueue = DispatchQueue(label: "dev.etokoji.thumbnailgenerator.state")
+    private var completionsByKey: [ThumbnailRequestKey: [(NSImage?) -> Void]] = [:]
+    private var latestThumbnailByURL: [URL: NSImage] = [:]
 
-        override func isEqual(_ object: Any?) -> Bool {
-            guard let other = object as? CacheKey else { return false }
-            return url == other.url && size == other.size
-        }
-
-        override var hash: Int {
-            var hasher = Hasher()
-            hasher.combine(url)
-            hasher.combine(size)
-            return hasher.finalize()
-        }
+    private init() {
+        generationQueue = OperationQueue()
+        generationQueue.name = "dev.etokoji.thumbnailgenerator"
+        generationQueue.qualityOfService = .userInitiated
+        generationQueue.maxConcurrentOperationCount = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
+        cache.countLimit = 800
     }
-    
-    private let cache = NSCache<CacheKey, NSImage>()
-    private let queue = DispatchQueue(label: "dev.etokoji.thumbnailgenerator", qos: .userInitiated)
-
-    private init() {}
 
     func thumbnail(for url: URL, size: CGFloat, completion: @escaping (NSImage?) -> Void) {
-        let cacheKey = CacheKey(url: url, size: size)
+        let key = ThumbnailRequestKey(url: url.standardizedFileURL, pixelSize: pixelSize(for: size))
+        let cacheKey = cacheKey(for: key)
         if let cachedImage = cache.object(forKey: cacheKey) {
+            stateQueue.sync {
+                latestThumbnailByURL[key.url] = cachedImage
+            }
             completion(cachedImage)
             return
         }
 
-        queue.async {
-            guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
-                DispatchQueue.main.async { completion(nil) }
-                return
+        // Coalesce duplicate requests so fast scrolling does not decode the same
+        // URL/size multiple times while the first request is still running.
+        var shouldStartGeneration = false
+        stateQueue.sync {
+            if completionsByKey[key] != nil {
+                completionsByKey[key]?.append(completion)
+            } else {
+                completionsByKey[key] = [completion]
+                shouldStartGeneration = true
+            }
+        }
+
+        guard shouldStartGeneration else { return }
+
+        generationQueue.addOperation { [weak self] in
+            guard let self else { return }
+            let image = self.generateThumbnail(for: key.url, pixelSize: key.pixelSize)
+            if let image {
+                self.cache.setObject(image, forKey: cacheKey)
             }
 
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: size * 2 // Use 2x for Retina displays
-            ]
-
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
-                DispatchQueue.main.async { completion(nil) }
-                return
+            let completions = self.stateQueue.sync { () -> [(NSImage?) -> Void] in
+                if let image {
+                    self.latestThumbnailByURL[key.url] = image
+                }
+                let completions = self.completionsByKey[key] ?? []
+                self.completionsByKey[key] = nil
+                return completions
             }
 
-            let nsImage = NSImage(cgImage: cgImage, size: .zero)
-            self.cache.setObject(nsImage, forKey: cacheKey)
-            
             DispatchQueue.main.async {
-                completion(nsImage)
+                completions.forEach { $0(image) }
             }
         }
     }
@@ -82,6 +91,43 @@ class ThumbnailGenerator {
                 continuation.resume(returning: image)
             }
         }
+    }
+
+    func cachedThumbnail(for url: URL) -> NSImage? {
+        let key = url.standardizedFileURL
+        return stateQueue.sync {
+            latestThumbnailByURL[key]
+        }
+    }
+
+    private func pixelSize(for size: CGFloat) -> Int {
+        max(1, Int(ceil(size * 2)))
+    }
+
+    private func cacheKey(for key: ThumbnailRequestKey) -> NSString {
+        "\(key.url.path)#\(key.pixelSize)" as NSString
+    }
+
+    private func generateThumbnail(for url: URL, pixelSize: Int) -> NSImage? {
+        guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return nil
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: pixelSize
+        ]
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+            return nil
+        }
+
+        return NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
     }
 }
 
@@ -122,38 +168,71 @@ struct FolderPaneState: Identifiable, Equatable {
     }
 }
 
-class PhotoSorterViewModel: ObservableObject {
-    @Published var photos: [PhotoItem] = []
-    @Published var sortMode: DateSortMode = .fileCreation
-    @Published var currentFolder: URL?
-    @Published var isProcessing: Bool = false
-    @Published var errorMessage: String?
-    @Published var showError: Bool = false
-    @Published var thumbnailSize: Double = 150
+@Observable class PhotoSorterViewModel {
+    var photos: [PhotoItem] = [] {
+        didSet { rebuildPhotoIndexes() }
+    }
+    var sortMode: DateSortMode = .fileCreation
+    var currentFolder: URL? {
+        didSet { rebuildPhotoIndexes() }
+    }
+    var isProcessing: Bool = false
+    var errorMessage: String?
+    var showError: Bool = false
+    var thumbnailSize: Double = 150
     // Selection
     // - primarySelectedPhotoID: the focused item used for preview + keyboard actions
     // - selectedPhotoIDs: supports multi-selection via mouse (cmd/shift)
-    @Published var primarySelectedPhotoID: UUID? = nil
-    @Published var selectedPhotoIDs: Set<UUID> = []
+    var primarySelectedPhotoID: UUID? = nil
+    var selectedPhotoIDs: Set<UUID> = []
+    var isArrowKeyNavigationActive: Bool = false
     private var selectionAnchorPhotoID: UUID? = nil
-    @Published var selectionContext: SelectionContext = .grid
+    var selectionContext: SelectionContext = .grid
+    private var photoByID: [UUID: PhotoItem] = [:]
+    private var photoIndexByID: [UUID: Int] = [:]
+    private var currentFolderPhotoIDs: [UUID] = []
+    private var keepPhotoIDs: [UUID] = []
+    private var discardedPhotoIDs: [UUID] = []
+    private var currentFolderIndexByID: [UUID: Int] = [:]
+    private var keepIndexByID: [UUID: Int] = [:]
+    private var discardedIndexByID: [UUID: Int] = [:]
     
     // For Folder Tree
-    @Published var folderTree: [FileSystemItem] = []
-    @Published var selectedFolderURL: URL?
+    var folderTree: [FileSystemItem] = []
+    var selectedFolderURL: URL?
     private var folderTreeRootURL: URL?
-    @Published var secondaryFolderTree: [FileSystemItem] = []
-    @Published var secondarySelectedFolderURL: URL?
+    var secondaryFolderTree: [FileSystemItem] = []
+    var secondarySelectedFolderURL: URL?
     private var secondaryFolderTreeRootURL: URL?
-    @Published var activeFolderPanel: FolderPanelKind?
-    @Published var targetedFolderURL: URL?
-    @Published var primaryExpandedFolderURLs: Set<URL> = []
-    @Published var secondaryExpandedFolderURLs: Set<URL> = []
-    @Published var folderPanes: [FolderPaneState] = []
+    var activeFolderPanel: FolderPanelKind?
+    var targetedFolderURL: URL?
+    var primaryExpandedFolderURLs: Set<URL> = []
+    var secondaryExpandedFolderURLs: Set<URL> = []
+    var folderPanes: [FolderPaneState] = []
     
     // Column counts for keyboard navigation
-    @Published var groupAColumns: Int = 2
-    @Published var groupBColumns: Int = 2
+    var groupAColumns: Int = 2
+    var groupBColumns: Int = 2
+
+    private func rebuildPhotoIndexes() {
+        photoByID = Dictionary(photos.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        photoIndexByID = Dictionary(uniqueKeysWithValues: photos.enumerated().map { ($0.element.id, $0.offset) })
+        keepPhotoIDs = photos.compactMap { $0.status == .groupA ? $0.id : nil }
+        discardedPhotoIDs = photos.compactMap { $0.status == .groupB ? $0.id : nil }
+        keepIndexByID = Dictionary(uniqueKeysWithValues: keepPhotoIDs.enumerated().map { ($0.element, $0.offset) })
+        discardedIndexByID = Dictionary(uniqueKeysWithValues: discardedPhotoIDs.enumerated().map { ($0.element, $0.offset) })
+
+        guard let currentFolder else {
+            currentFolderPhotoIDs = []
+            currentFolderIndexByID = [:]
+            return
+        }
+        let normalizedPath = currentFolder.standardizedFileURL.path.lowercased()
+        currentFolderPhotoIDs = photos.compactMap { photo in
+            photo.url.deletingLastPathComponent().path.lowercased() == normalizedPath ? photo.id : nil
+        }
+        currentFolderIndexByID = Dictionary(uniqueKeysWithValues: currentFolderPhotoIDs.enumerated().map { ($0.element, $0.offset) })
+    }
     
     func applyWindowLayoutSettings(_ settings: WindowLayoutSettings) {
         thumbnailSize = settings.thumbnailSize
@@ -705,7 +784,7 @@ class PhotoSorterViewModel: ObservableObject {
     
     // Toggle status or set specific status
     func toggleStatus(for item: PhotoItem) {
-        if let index = photos.firstIndex(where: { $0.id == item.id }) {
+        if let index = photoIndexByID[item.id] {
             let nextStatus: PhotoStatus
             switch photos[index].status {
             case .unknown:
@@ -720,7 +799,7 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     func setStatus(for item: PhotoItem, status: PhotoStatus) {
-        if let index = photos.firstIndex(where: { $0.id == item.id }) {
+        if let index = photoIndexByID[item.id] {
             // Check if we need to advance selection before changing status
             // Only if we are in a filtered context (Keep or Discard) and the item will disappear from view
             let isCurrentSelection = (primarySelectedPhotoID == item.id)
@@ -1394,21 +1473,28 @@ class PhotoSorterViewModel: ObservableObject {
     }
     
     var currentFolderPhotos: [PhotoItem] {
-        guard let currentFolder else { return [] }
-        let normalizedPath = currentFolder.standardizedFileURL.path.lowercased()
-        return photos.filter { photo in
-            photo.url.deletingLastPathComponent().path.lowercased() == normalizedPath
-        }
+        currentFolderPhotoIDs.compactMap { photoByID[$0] }
     }
 
     private func selectableIDs(for context: SelectionContext) -> [UUID] {
         switch context {
         case .grid:
-            return currentFolderPhotos.map { $0.id }
+            return currentFolderPhotoIDs
         case .keep:
-            return photos.filter { $0.status == .groupA }.map { $0.id }
+            return keepPhotoIDs
         case .discard:
-            return photos.filter { $0.status == .groupB }.map { $0.id }
+            return discardedPhotoIDs
+        }
+    }
+
+    private func selectableIndex(of id: UUID, in context: SelectionContext) -> Int? {
+        switch context {
+        case .grid:
+            return currentFolderIndexByID[id]
+        case .keep:
+            return keepIndexByID[id]
+        case .discard:
+            return discardedIndexByID[id]
         }
     }
 
@@ -1435,7 +1521,7 @@ class PhotoSorterViewModel: ObservableObject {
         guard !contextIDs.isEmpty else { return }
         
         let currentID = primarySelectedPhotoID ?? contextIDs.first!
-        guard let currentIndex = contextIDs.firstIndex(of: currentID) else {
+        guard let currentIndex = selectableIndex(of: currentID, in: selectionContext) else {
             // Should be in the list, but if not found, select first (deferred to avoid view-update publish)
             selectSingle(contextIDs.first!, deferred: true)
             return
@@ -1474,11 +1560,43 @@ class PhotoSorterViewModel: ObservableObject {
             selectSingle(contextIDs[newIndex], deferred: true)
         }
     }
-    
+
+    // Pre-warm the thumbnail cache for items ahead in the navigation direction so that
+    // items outside the visible LazyVGrid area are ready when the user arrives.
+    func prefetchAdjacentThumbnails(direction: NavigationDirection, columns: Int) {
+        let lookahead = 4
+        let contextIDs = selectableIDs(for: selectionContext)
+        guard let currentID = primarySelectedPhotoID,
+              let currentIndex = selectableIndex(of: currentID, in: selectionContext) else { return }
+
+        let effectiveColumns: Int
+        switch selectionContext {
+        case .grid: effectiveColumns = max(1, columns)
+        case .keep: effectiveColumns = max(1, groupAColumns)
+        case .discard: effectiveColumns = max(1, groupBColumns)
+        }
+
+        let stride: Int
+        switch direction {
+        case .left: stride = -1
+        case .right: stride = 1
+        case .up: stride = -effectiveColumns
+        case .down: stride = effectiveColumns
+        }
+
+        let size = CGFloat(thumbnailSize)
+        for i in 1...lookahead {
+            let nextIndex = currentIndex + stride * i
+            guard nextIndex >= 0, nextIndex < contextIDs.count else { break }
+            guard let photo = photoByID[contextIDs[nextIndex]] else { continue }
+            ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size) { _ in }
+        }
+    }
+
     func toggleSelectedPhotoStatus(deferred: Bool = false) {
         let apply = {
             guard let selectedID = self.primarySelectedPhotoID,
-                  let photo = self.photos.first(where: { $0.id == selectedID }) else {
+                  let photo = self.photoByID[selectedID] else {
                 return
             }
             self.toggleStatus(for: photo)
@@ -1492,7 +1610,7 @@ class PhotoSorterViewModel: ObservableObject {
     
     var selectedPhoto: PhotoItem? {
         guard let selectedID = primarySelectedPhotoID else { return nil }
-        return photos.first(where: { $0.id == selectedID })
+        return photoByID[selectedID]
     }
     
     // Date for UI display based on setting

@@ -5,11 +5,12 @@
 
 import SwiftUI
 import AppKit
+import ImageIO
 
 // MARK: - Image Preview Window View
 
 struct ImagePreviewWindowView: View {
-    @ObservedObject var viewModel: PhotoSorterViewModel
+    var viewModel: PhotoSorterViewModel
     let onClose: () -> Void
 
     var body: some View {
@@ -230,6 +231,7 @@ final class ObservingScrollView: NSScrollView {
 
 struct ZoomableAsyncImageView: NSViewRepresentable {
     var url: URL
+    var allowFullImageLoad: Bool = true
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = ObservingScrollView()
@@ -271,6 +273,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 
         context.coordinator.imageView = imageView
         context.coordinator.scrollView = scrollView
+        context.coordinator.setAllowsFullImageLoad(allowFullImageLoad)
         context.coordinator.observeBoundsChanges()
         context.coordinator.loadImage(from: url)
 
@@ -278,6 +281,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+        context.coordinator.setAllowsFullImageLoad(allowFullImageLoad)
         if context.coordinator.currentURL != url {
             context.coordinator.loadImage(from: url)
         } else {
@@ -301,15 +305,61 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         private var userHasAdjustedZoom = false
         private let actualPixelScale: CGFloat = 1.0
         private let zoomToggleTolerance: CGFloat = 0.01
+        // Preview loading is staged for slow SD cards: show an in-memory grid
+        // thumbnail immediately, then a small ImageIO preview, and only start the
+        // full image load after the selection has stayed on the same file briefly.
+        private let previewPixelSize = 768
+        private let fullImageLoadDelay: TimeInterval = 0.75
+        private let isFullImageLoadingDisabledForThumbnailPreviewTest = false
+        private let previewImageQueue: OperationQueue = {
+            let queue = OperationQueue()
+            queue.name = "dev.etokoji.preview-thumbnail-loader"
+            queue.qualityOfService = .userInitiated
+            queue.maxConcurrentOperationCount = 1
+            return queue
+        }()
+        private let fullImageQueue: OperationQueue = {
+            let queue = OperationQueue()
+            queue.name = "dev.etokoji.preview-full-image-loader"
+            queue.qualityOfService = .utility
+            queue.maxConcurrentOperationCount = 1
+            return queue
+        }()
+        private var loadGeneration = 0
+        private var scheduledFullLoadGeneration: Int?
+        private var allowsFullImageLoad = true
+        private var allowsCurrentImageUpscaling = false
         private var panStartOrigin: NSPoint?
+        private var previewWasSkippedForCurrentLoad = false
 
         init(_ parent: ZoomableAsyncImageView) {
             self.parent = parent
         }
 
         deinit {
+            previewImageQueue.cancelAllOperations()
+            fullImageQueue.cancelAllOperations()
             if let observer = boundsObserver {
                 NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        func setAllowsFullImageLoad(_ isAllowed: Bool) {
+            guard allowsFullImageLoad != isAllowed else { return }
+            allowsFullImageLoad = isAllowed
+
+            if isAllowed {
+                if let currentURL {
+                    // Restart the preview that was skipped during rapid navigation.
+                    if previewWasSkippedForCurrentLoad {
+                        previewWasSkippedForCurrentLoad = false
+                        enqueuePreviewOperation(for: currentURL, generation: loadGeneration)
+                    }
+                    scheduleFullImageLoad(for: currentURL, generation: loadGeneration)
+                }
+            } else {
+                scheduledFullLoadGeneration = nil
+                fullImageQueue.cancelAllOperations()
             }
         }
 
@@ -325,19 +375,125 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         }
 
         func loadImage(from url: URL) {
-            self.currentURL = url
-            self.didApplyInitialFit = false
-            self.userHasAdjustedZoom = false
-            DispatchQueue.global().async {
-                if let image = NSImage(contentsOf: url) {
-                    DispatchQueue.main.async {
-                        guard let imageView = self.imageView else { return }
-                        imageView.image = image
-                        imageView.frame.size = image.size
-                        self.applyInitialFitIfNeeded(force: true)
+            let requestURL = url.standardizedFileURL
+            currentURL = requestURL
+            didApplyInitialFit = false
+            userHasAdjustedZoom = false
+            loadGeneration += 1
+            let generation = loadGeneration
+            scheduledFullLoadGeneration = nil
+            previewWasSkippedForCurrentLoad = false
+
+            previewImageQueue.cancelAllOperations()
+            fullImageQueue.cancelAllOperations()
+
+            // First paint: reuse the thumbnail already decoded for the grid if it
+            // exists. This avoids touching the SD card when arrow-key navigation
+            // lands on an item whose grid thumbnail is already in memory.
+            if let cachedThumbnail = ThumbnailGenerator.shared.cachedThumbnail(for: requestURL) {
+                displayLoadedImage(cachedThumbnail, allowsUpscaling: true)
+                scheduleFullImageLoad(for: requestURL, generation: generation)
+                // During rapid navigation the cached thumbnail is sufficient; skip the
+                // SD card read for the preview. setAllowsFullImageLoad(true) will
+                // restart it when the key is released.
+                if !allowsFullImageLoad {
+                    previewWasSkippedForCurrentLoad = true
+                    return
+                }
+            } else {
+                imageView?.image = nil
+                imageView?.frame.size = .zero
+            }
+
+            // Second paint: generate a small preview on its own queue. It can still
+            // block on SD card I/O, but it is cheaper than decoding the full image.
+            enqueuePreviewOperation(for: requestURL, generation: generation)
+        }
+
+        private func enqueuePreviewOperation(for requestURL: URL, generation: Int) {
+            var previewOperation: BlockOperation!
+            previewOperation = BlockOperation { [weak self, weak previewOperation] in
+                guard previewOperation?.isCancelled == false else { return }
+
+                if let previewImage = Self.previewThumbnail(for: requestURL, maxPixelSize: self?.previewPixelSize ?? 768) {
+                    DispatchQueue.main.async { [weak self, weak previewOperation] in
+                        guard let self,
+                              previewOperation?.isCancelled == false,
+                              self.currentURL == requestURL,
+                              self.loadGeneration == generation
+                        else { return }
+                        self.displayLoadedImage(previewImage, allowsUpscaling: true)
+                        self.scheduleFullImageLoad(for: requestURL, generation: generation)
                     }
                 }
             }
+            previewImageQueue.addOperation(previewOperation)
+        }
+
+        private func displayLoadedImage(_ image: NSImage, allowsUpscaling: Bool) {
+            guard let imageView else { return }
+            allowsCurrentImageUpscaling = allowsUpscaling
+            imageView.image = image
+            imageView.frame.size = image.size
+            applyInitialFitIfNeeded(force: true)
+        }
+
+        private func scheduleFullImageLoad(for url: URL, generation: Int) {
+            // Full-image reads are intentionally delayed because NSImage(contentsOf:)
+            // cannot be cancelled once the SD card read has started, and it can starve
+            // later thumbnail/preview reads during held-arrow navigation.
+            guard !isFullImageLoadingDisabledForThumbnailPreviewTest else { return }
+            guard allowsFullImageLoad else { return }
+            guard scheduledFullLoadGeneration != generation else { return }
+            scheduledFullLoadGeneration = generation
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + fullImageLoadDelay) { [weak self] in
+                guard let self,
+                      self.currentURL == url,
+                      self.loadGeneration == generation
+                else { return }
+                self.enqueueFullImageLoad(for: url, generation: generation)
+            }
+        }
+
+        private func enqueueFullImageLoad(for url: URL, generation: Int) {
+            var fullOperation: BlockOperation!
+            fullOperation = BlockOperation { [weak self, weak fullOperation] in
+                guard fullOperation?.isCancelled == false else { return }
+                guard let fullImage = NSImage(contentsOf: url) else { return }
+
+                DispatchQueue.main.async { [weak self, weak fullOperation] in
+                    guard let self,
+                          fullOperation?.isCancelled == false,
+                          self.currentURL == url,
+                          self.loadGeneration == generation
+                    else { return }
+                    self.displayLoadedImage(fullImage, allowsUpscaling: false)
+                }
+            }
+            fullImageQueue.addOperation(fullOperation)
+        }
+
+        private static func previewThumbnail(for url: URL, maxPixelSize: Int) -> NSImage? {
+            guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+                return nil
+            }
+
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+                return nil
+            }
+
+            return NSImage(
+                cgImage: cgImage,
+                size: NSSize(width: cgImage.width, height: cgImage.height)
+            )
         }
 
         @objc func handleDoubleClick(gesture: NSClickGestureRecognizer) {
@@ -434,7 +590,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             let fitScale = min(scaleX, scaleY)
             guard fitScale.isFinite, fitScale > 0 else { return nil }
 
-            return min(fitScale, 1.0)
+            return allowsCurrentImageUpscaling ? fitScale : min(fitScale, 1.0)
         }
 
         private func applyFit(scale: CGFloat, in scrollView: NSScrollView, animated: Bool) {

@@ -12,7 +12,7 @@ import ImageIO
 import Darwin
 
 struct ContentView: View {
-    @StateObject private var viewModel = PhotoSorterViewModel()
+    @State private var viewModel = PhotoSorterViewModel()
     @State private var showImagePreview = false
     @FocusState private var isGridFocused: Bool
     @State private var actualGridWidth: CGFloat = 800
@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var didApplyLayoutDefaults = false
     @State private var initialWindowSize: CGSize?
     @State private var defaultSidebarExifPaneHeight: CGFloat?
+    @State private var navigationIdleTask: Task<Void, Never>?
     @Environment(\.undoManager) private var undoManager
     
     // Monitor for Option key state
@@ -154,9 +155,8 @@ struct ContentView: View {
                 splitPositionKey: "\(windowID)_MainSplitPosition"
             )
             .frame(minWidth: 800)
-            .onKeyPress(.upArrow) {
-                viewModel.moveSelection(direction: .up, columns: actualColumns)
-                return .handled
+            .onKeyPress(.upArrow, phases: .all) { press in
+                handleNavigationKeyPress(press, direction: .up)
             }
             .onAppear {
                 // Initialize bridge state
@@ -180,17 +180,14 @@ struct ContentView: View {
                     viewModel.resortPhotos()
                 }
             }
-            .onKeyPress(.downArrow) {
-                viewModel.moveSelection(direction: .down, columns: actualColumns)
-                return .handled
+            .onKeyPress(.downArrow, phases: .all) { press in
+                handleNavigationKeyPress(press, direction: .down)
             }
-            .onKeyPress(.leftArrow) {
-                viewModel.moveSelection(direction: .left, columns: actualColumns)
-                return .handled
+            .onKeyPress(.leftArrow, phases: .all) { press in
+                handleNavigationKeyPress(press, direction: .left)
             }
-            .onKeyPress(.rightArrow) {
-                viewModel.moveSelection(direction: .right, columns: actualColumns)
-                return .handled
+            .onKeyPress(.rightArrow, phases: .all) { press in
+                handleNavigationKeyPress(press, direction: .right)
             }
             .onKeyPress(.space) {
                 // Space: Toggle preview window
@@ -278,8 +275,8 @@ struct ContentView: View {
                 openPreviewWindow(for: selectedPhoto)
             }
         }
-        .environmentObject(viewModel)
-        .focusedSceneObject(viewModel)
+        .environment(viewModel)
+        .focusedValue(\.viewModel, viewModel)
 #if os(macOS)
         .background(WindowTitleSetter(title: viewModel.windowTitle))
         .background(WindowInitialSizeSetter(size: initialWindowSize))
@@ -321,6 +318,41 @@ struct ContentView: View {
                 viewModel.openFolderPane(from: url)
             }
         }
+    }
+
+    private func handleNavigationKeyPress(_ press: KeyPress, direction: NavigationDirection) -> KeyPress.Result {
+        if press.phase.contains(.up) {
+            endArrowKeyNavigation()
+            return .handled
+        }
+
+        if press.phase.contains(.down) || press.phase.contains(.repeat) {
+            beginArrowKeyNavigation()
+            viewModel.moveSelection(direction: direction, columns: actualColumns)
+            viewModel.prefetchAdjacentThumbnails(direction: direction, columns: actualColumns)
+            return .handled
+        }
+
+        return .ignored
+    }
+
+    private func beginArrowKeyNavigation() {
+        viewModel.isArrowKeyNavigationActive = true
+        navigationIdleTask?.cancel()
+        navigationIdleTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                viewModel.isArrowKeyNavigationActive = false
+                navigationIdleTask = nil
+            }
+        }
+    }
+
+    private func endArrowKeyNavigation() {
+        navigationIdleTask?.cancel()
+        navigationIdleTask = nil
+        viewModel.isArrowKeyNavigationActive = false
     }
 
     private func togglePreviewWindow() {
@@ -473,7 +505,7 @@ private struct AppMemoryUsage {
 struct FolderPanelsContainer: View {
     let onOpenFolder: () -> Void
     @Binding var exifPaneHeight: CGFloat?
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     @State private var folderPaneHeights: [UUID: CGFloat] = [:]
 
     var body: some View {
@@ -1142,7 +1174,7 @@ struct FolderTreeView: View {
     let folderTree: [FileSystemItem]
     @Binding var selectedFolderURL: URL?
     let panelKind: FolderPanelKind
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     @State private var localSelection: URL?
 
     var body: some View {
@@ -1233,7 +1265,7 @@ struct FolderTreeNode: View {
     let panelKind: FolderPanelKind
     @Binding var localSelection: URL?
     let onSelect: (URL) -> Void
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     private var hasChildren: Bool {
         guard let children = item.children else { return false }
@@ -1535,7 +1567,7 @@ struct PhotoGridView: View {
     let onSelect: (_ id: UUID, _ orderedIDs: [UUID], _ isCommandPressed: Bool, _ isShiftPressed: Bool, _ context: SelectionContext) -> Void
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var isContextActive: Bool = false
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     @Environment(\.undoManager) private var undoManager
     
     var body: some View {
@@ -1558,12 +1590,17 @@ struct PhotoGridView: View {
                     .onChange(of: geometry.size.width) { oldValue, newValue in
                         actualGridWidth = newValue
                     }
-                    .onChange(of: primarySelectedPhotoID) { oldValue, newValue in
-                        if let newValue = newValue {
-                            withAnimation {
-                                proxy.scrollTo(newValue, anchor: .center)
-                            }
+                    .onChange(of: primarySelectedPhotoID) { _, newValue in
+                        if viewModel.isArrowKeyNavigationActive {
+                            guard let newValue else { return }
+                            proxy.scrollTo(newValue, anchor: .center)
+                        } else {
+                            scrollSelectionIntoView(newValue, proxy: proxy)
                         }
+                    }
+                    .onChange(of: viewModel.isArrowKeyNavigationActive) { _, isActive in
+                        guard !isActive else { return }
+                        scrollSelectionIntoView(primarySelectedPhotoID, proxy: proxy)
                     }
 #if os(macOS)
                     .onDrop(of: [PhotoDragPayload.contentType, .fileURL],
@@ -1637,6 +1674,13 @@ struct PhotoGridView: View {
         .background(Material.bar)
     }
 
+    private func scrollSelectionIntoView(_ id: UUID?, proxy: ScrollViewProxy) {
+        guard let id else { return }
+        withAnimation {
+            proxy.scrollTo(id, anchor: .center)
+        }
+    }
+
     var gridContent: some View {
         LazyVGrid(columns: columns, spacing: 10) {
             ForEach(photos) { photo in
@@ -1658,7 +1702,11 @@ struct PhotoGridView: View {
             },
             onSetStatusForSelection: { status in
                 onSetStatusForSelection(status)
-            }
+            },
+            onDelete: { viewModel.deletePhotos(withIDs: viewModel.selectedPhotoIDs) },
+            onTrash: { viewModel.trashPhotos(withIDs: viewModel.selectedPhotoIDs) },
+            selectedCount: selectedPhotoIDs.count,
+            dragURLsProvider: { viewModel.urlsForDrag(startingAt: photo) }
         )
         .id(photo.id)
         .onTapGesture {
@@ -1792,6 +1840,11 @@ struct DragPreviewThumbnail: View {
     }
 }
 
+private struct ThumbnailLoadRequest: Hashable {
+    let url: URL
+    let size: CGFloat
+}
+
 struct PhotoGridItem: View {
     let photo: PhotoItem
     let thumbnailSize: Double
@@ -1799,9 +1852,12 @@ struct PhotoGridItem: View {
     var isPrimary: Bool = false
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    var onTrash: (() -> Void)? = nil
+    var selectedCount: Int = 0
+    var dragURLsProvider: (() -> [URL])? = nil
     @State private var thumbnail: NSImage?
     @State private var showDeleteConfirmation = false
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -1842,7 +1898,11 @@ struct PhotoGridItem: View {
             }
         }
         .opacity(photo.status == .groupB ? 0.5 : 1.0)
-        .onAppear(perform: loadThumbnail)
+        // Use a cancellable SwiftUI task so reused/offscreen cells do not apply
+        // stale thumbnail results during fast scrolling or thumbnail-size changes.
+        .task(id: ThumbnailLoadRequest(url: photo.url, size: CGFloat(thumbnailSize))) {
+            await loadThumbnail(size: CGFloat(thumbnailSize))
+        }
         .overlay(RightClickCaptureView {
             onEnsureSelectedForContextMenu?()
         })
@@ -1867,32 +1927,29 @@ struct PhotoGridItem: View {
         }
         .alert("ファイルを削除", isPresented: $showDeleteConfirmation) {
             Button("完全削除", role: .destructive) {
-                viewModel.deletePhotos(withIDs: viewModel.selectedPhotoIDs)
+                onDelete?()
             }
             Button("ゴミ箱/削除予定へ移動") {
-                viewModel.trashPhotos(withIDs: viewModel.selectedPhotoIDs)
+                onTrash?()
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            let count = viewModel.selectedPhotoIDs.count
-            if count <= 1 {
+            if selectedCount <= 1 {
                 Text("選択した写真を削除します。")
             } else {
-                Text("選択した\(count)枚の写真を削除します。")
+                Text("選択した\(selectedCount)枚の写真を削除します。")
             }
         }
 #if os(macOS)
-        .draggable(PhotoDragPayload(urls: viewModel.urlsForDrag(startingAt: photo))) {
+        .draggable(PhotoDragPayload(urls: dragURLsProvider?() ?? [])) {
+            let urls = dragURLsProvider?() ?? []
             DragPreviewThumbnail(
                 thumbnail: thumbnail,
-                count: viewModel.urlsForDrag(startingAt: photo).count,
+                count: urls.count,
                 size: min(CGFloat(thumbnailSize), 160)
             )
         }
 #endif
-        .onChange(of: thumbnailSize) { oldValue, newValue in
-            loadThumbnail()
-        }
     }
 
     private func handleContextMenuAction(_ status: PhotoStatus) {
@@ -1902,12 +1959,18 @@ struct PhotoGridItem: View {
         }
     }
     
-    private func loadThumbnail() {
-        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: thumbnailSize) { image in
-            self.thumbnail = image
+    @MainActor
+    private func loadThumbnail(size: CGFloat) async {
+        // Synchronous cache check: set thumbnail immediately to avoid a one-frame
+        // gray placeholder when cells re-appear after scrolling.
+        if let cached = ThumbnailGenerator.shared.cachedThumbnail(for: photo.url) {
+            thumbnail = cached
         }
+        let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
+        guard !Task.isCancelled else { return }
+        if let image { thumbnail = image }
     }
-    
+
     var borderColor: Color {
         switch photo.status {
         case .groupA: return .green
@@ -2009,7 +2072,7 @@ struct RightSidePanel: View {
 // MARK: - EXIF Info Panel (Folder sidebar)
 
 struct ExifInfoPanel: View {
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     @State private var entries: [(String, String)] = []
     @State private var isLoading = false
     @State private var lastURL: URL?
@@ -2179,7 +2242,7 @@ struct FolderTreeRow: View {
     let isSelected: Bool
     let panelKind: FolderPanelKind
     let onSelect: () -> Void
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     @Environment(\.undoManager) private var undoManager
 
     var body: some View {
@@ -2271,7 +2334,7 @@ struct PhotoDragPayload: Codable, Transferable {
 struct SelectedPhotoPreview: View {
     let photo: PhotoItem?
     var onOpenPreview: (() -> Void)? = nil
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -2291,7 +2354,11 @@ struct SelectedPhotoPreview: View {
             // Preview Content
             if let photo = photo {
                 GeometryReader { geometry in
-                    PreviewImageView(url: photo.url, displaySize: geometry.size)
+                    PreviewImageView(
+                        url: photo.url,
+                        displaySize: geometry.size,
+                        allowsThumbnailGeneration: !viewModel.isArrowKeyNavigationActive
+                    )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .contentShape(Rectangle())
@@ -2370,11 +2437,13 @@ struct SelectedPhotoPreview: View {
 private struct PreviewImageView: View {
     let url: URL
     let displaySize: CGSize
+    let allowsThumbnailGeneration: Bool
     @State private var image: NSImage?
     @State private var isLoading = false
     @State private var didFail = false
 
     private var thumbnailSize: CGFloat {
+        guard allowsThumbnailGeneration else { return 160 }
         let maxDimension = max(displaySize.width, displaySize.height)
         guard maxDimension.isFinite, maxDimension > 0 else { return 640 }
         return max(160, ceil(maxDimension / 64) * 64)
@@ -2404,7 +2473,7 @@ private struct PreviewImageView: View {
                 ProgressView()
             }
         }
-        .task(id: PreviewImageRequest(url: url, size: thumbnailSize)) {
+        .task(id: PreviewImageRequest(url: url, size: thumbnailSize, allowsGeneration: allowsThumbnailGeneration)) {
             await loadImage()
         }
     }
@@ -2414,10 +2483,22 @@ private struct PreviewImageView: View {
         didFail = false
         isLoading = true
 
+        if let cachedThumbnail = ThumbnailGenerator.shared.cachedThumbnail(for: url) {
+            image = cachedThumbnail
+            didFail = false
+            isLoading = allowsThumbnailGeneration
+        }
+
+        guard allowsThumbnailGeneration else {
+            didFail = false
+            isLoading = false
+            return
+        }
+
         let loadedImage = await ThumbnailGenerator.shared.thumbnail(for: url, size: thumbnailSize)
 
         guard !Task.isCancelled else { return }
-        image = loadedImage
+        image = loadedImage ?? image
         didFail = loadedImage == nil
         isLoading = false
     }
@@ -2425,6 +2506,7 @@ private struct PreviewImageView: View {
     private struct PreviewImageRequest: Hashable {
         let url: URL
         let size: CGFloat
+        let allowsGeneration: Bool
     }
 }
 
@@ -2437,7 +2519,7 @@ struct GroupASidePanel: View {
     var isContextActive: Bool = false
     
     // Add ViewModel environment object to update column count
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -2531,9 +2613,19 @@ struct GroupASidePanel: View {
                     }
                         .onChange(of: primarySelectedPhotoID) { _, newValue in
                             if let newValue = newValue, isContextActive {
-                                withAnimation {
+                                if viewModel.isArrowKeyNavigationActive {
                                     proxy.scrollTo(newValue, anchor: .center)
+                                } else {
+                                    withAnimation {
+                                        proxy.scrollTo(newValue, anchor: .center)
+                                    }
                                 }
+                            }
+                        }
+                        .onChange(of: viewModel.isArrowKeyNavigationActive) { _, isActive in
+                            guard !isActive, isContextActive, let primarySelectedPhotoID else { return }
+                            withAnimation {
+                                proxy.scrollTo(primarySelectedPhotoID, anchor: .center)
                             }
                         }
                     }
@@ -2566,7 +2658,7 @@ struct GroupAThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -2599,7 +2691,9 @@ struct GroupAThumbnail: View {
                 .background(.ultraThinMaterial, in: Circle())
                 .padding(2)
         }
-        .onAppear(perform: loadThumbnail)
+        .task(id: ThumbnailLoadRequest(url: photo.url, size: 160)) {
+            await loadThumbnail(size: 160)
+        }
         .contextMenu {
             Button("採用にする") {
                 handleContextMenuAction(.groupA)
@@ -2630,10 +2724,16 @@ struct GroupAThumbnail: View {
         }
     }
     
-    private func loadThumbnail() {
-        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: 160) { image in
-            self.thumbnail = image
+    @MainActor
+    private func loadThumbnail(size: CGFloat) async {
+        // Synchronous cache check: set thumbnail immediately to avoid a one-frame
+        // gray placeholder when cells re-appear after scrolling.
+        if let cached = ThumbnailGenerator.shared.cachedThumbnail(for: photo.url) {
+            thumbnail = cached
         }
+        let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
+        guard !Task.isCancelled else { return }
+        if let image { thumbnail = image }
     }
 }
 
@@ -2645,7 +2745,7 @@ struct GroupBSidePanel: View {
     let onSetStatusForSelection: (_ status: PhotoStatus) -> Void
     var isContextActive: Bool = false
     
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     let columns = [
         GridItem(.adaptive(minimum: 80), spacing: 4)
@@ -2739,9 +2839,19 @@ struct GroupBSidePanel: View {
                     }
                         .onChange(of: primarySelectedPhotoID) { _, newValue in
                             if let newValue = newValue, isContextActive {
-                                withAnimation {
+                                if viewModel.isArrowKeyNavigationActive {
                                     proxy.scrollTo(newValue, anchor: .center)
+                                } else {
+                                    withAnimation {
+                                        proxy.scrollTo(newValue, anchor: .center)
+                                    }
                                 }
+                            }
+                        }
+                        .onChange(of: viewModel.isArrowKeyNavigationActive) { _, isActive in
+                            guard !isActive, isContextActive, let primarySelectedPhotoID else { return }
+                            withAnimation {
+                                proxy.scrollTo(primarySelectedPhotoID, anchor: .center)
                             }
                         }
                     }
@@ -2774,7 +2884,7 @@ struct GroupBThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
-    @EnvironmentObject private var viewModel: PhotoSorterViewModel
+    @Environment(PhotoSorterViewModel.self) private var viewModel
     
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -2807,7 +2917,9 @@ struct GroupBThumbnail: View {
                 .background(.ultraThinMaterial, in: Circle())
                 .padding(2)
         }
-        .onAppear(perform: loadThumbnail)
+        .task(id: ThumbnailLoadRequest(url: photo.url, size: 160)) {
+            await loadThumbnail(size: 160)
+        }
         .overlay(RightClickCaptureView {
             onEnsureSelectedForContextMenu?()
         })
@@ -2841,10 +2953,16 @@ struct GroupBThumbnail: View {
         }
     }
     
-    private func loadThumbnail() {
-        ThumbnailGenerator.shared.thumbnail(for: photo.url, size: 160) { image in
-            self.thumbnail = image
+    @MainActor
+    private func loadThumbnail(size: CGFloat) async {
+        // Synchronous cache check: set thumbnail immediately to avoid a one-frame
+        // gray placeholder when cells re-appear after scrolling.
+        if let cached = ThumbnailGenerator.shared.cachedThumbnail(for: photo.url) {
+            thumbnail = cached
         }
+        let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
+        guard !Task.isCancelled else { return }
+        if let image { thumbnail = image }
     }
 }
 
@@ -2985,4 +3103,8 @@ extension View {
             self
         }
     }
+}
+
+extension FocusedValues {
+    @Entry var viewModel: PhotoSorterViewModel? = nil
 }
