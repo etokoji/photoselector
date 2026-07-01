@@ -7,63 +7,109 @@ import SwiftUI
 import AppKit
 import ImageIO
 
+// MARK: - Zoom Controller
+
+fileprivate protocol ZoomControlTarget: AnyObject {
+    func zoomToFitFromController()
+    func zoomToActualSizeFromController()
+    func setMagnificationFromController(_ magnification: CGFloat)
+}
+
+@Observable
+final class ZoomController {
+    var magnification: CGFloat = 1.0
+    @ObservationIgnored private weak var target: ZoomControlTarget?
+
+    fileprivate func setTarget(_ target: ZoomControlTarget) {
+        self.target = target
+    }
+
+    fileprivate func clearTarget(_ target: ZoomControlTarget) {
+        guard self.target === target else { return }
+        self.target = nil
+    }
+
+    func zoomToFit() {
+        target?.zoomToFitFromController()
+    }
+
+    func zoomToActualSize() {
+        target?.zoomToActualSizeFromController()
+    }
+
+    func setMagnification(_ magnification: CGFloat) {
+        target?.setMagnificationFromController(magnification)
+    }
+}
+
 // MARK: - Image Preview Window View
 
 struct ImagePreviewWindowView: View {
     var viewModel: PhotoSorterViewModel
+    let photo: PhotoItem
+    let zoomController: ZoomController
     let onClose: () -> Void
+
+    private var zoomText: String {
+        let pct = Int((zoomController.magnification * 100).rounded())
+        return "\(pct)%"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let photo = viewModel.selectedPhoto {
-                ZoomableAsyncImageView(url: photo.url)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZoomableAsyncImageView(url: photo.url, controller: zoomController)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Bottom bar with filename and date
-                HStack(spacing: 8) {
-                    Text(photo.filename)
+            // Bottom bar with filename, date, and zoom controls. Keep this out of
+            // SwiftUI toolbar because non-activating panels can trigger AppKit
+            // toolbar constraint churn during rapid rootView updates.
+            HStack(spacing: 8) {
+                Text(photo.filename)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                if let fileSize = photo.formattedFileSize {
+                    Text(fileSize)
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    if let fileSize = photo.formattedFileSize {
-                        Text(fileSize)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if let date = viewModel.displayedDate(for: photo) {
-                        Text("(\(formatDate(date)))")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
                 }
-                .padding(8)
-                .background(Material.bar)
-            } else {
-                VStack {
-                    Image(systemName: "photo")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("No photo selected")
+
+                if let date = viewModel.displayedDate(for: photo) {
+                    Text("(\(formatDate(date)))")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                        .padding(.top, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: {
-                    NSApp.keyWindow?.performClose(nil)
-                }) {
-                    Image(systemName: "xmark.circle")
+
+                Spacer()
+
+                Text(zoomText)
+                    .monospacedDigit()
+                    .font(.subheadline)
+                    .frame(minWidth: 52, alignment: .trailing)
+
+                Slider(
+                    value: Binding(
+                        get: { Double(zoomController.magnification) },
+                        set: { zoomController.setMagnification(CGFloat($0)) }
+                    ),
+                    in: 0.1...4.0
+                )
+                .frame(width: 140)
+                .help("表示倍率")
+
+                Button("Fit") {
+                    zoomController.zoomToFit()
                 }
-                .keyboardShortcut("w", modifiers: .command)
-                .help("Close (⌘W, Enter, or Space)")
+                .help("ウインドウに合わせる")
+
+                Button("原寸") {
+                    zoomController.zoomToActualSize()
+                }
+                .help("原寸表示 (100%)")
             }
+            .padding(8)
+            .background(Material.bar)
         }
     }
 }
@@ -73,23 +119,139 @@ struct ImagePreviewWindowView: View {
 class PreviewWindowSizeManager {
     static let shared = PreviewWindowSizeManager()
 
-    private let widthKey = "PreviewWindowWidth"
-    private let heightKey = "PreviewWindowHeight"
+    private let widthKey = "PreviewWindowContentWidth"
+    private let heightKey = "PreviewWindowContentHeight"
+    private let originXKey = "PreviewWindowOriginX"
+    private let originYKey = "PreviewWindowOriginY"
     private let defaultWidth: CGFloat = 800
     private let defaultHeight: CGFloat = 600
+    private let minimumWidth: CGFloat = 360
+    private let minimumHeight: CGFloat = 240
+    private let screenMargin: CGFloat = 80
 
     func saveWindowSize(_ size: NSSize) {
+        guard size.width >= minimumWidth, size.height >= minimumHeight else { return }
         UserDefaults.standard.set(Double(size.width), forKey: widthKey)
         UserDefaults.standard.set(Double(size.height), forKey: heightKey)
     }
 
-    func restoreWindowSize() -> NSSize {
+    func restoreWindowSize(screen: NSScreen? = NSScreen.main) -> NSSize {
         let width = UserDefaults.standard.double(forKey: widthKey)
         let height = UserDefaults.standard.double(forKey: heightKey)
-        if width == 0 || height == 0 {
-            return NSSize(width: defaultWidth, height: defaultHeight)
+        let restoredSize = width == 0 || height == 0
+            ? NSSize(width: defaultWidth, height: defaultHeight)
+            : NSSize(width: width, height: height)
+
+        guard let visibleFrame = screen?.visibleFrame else { return restoredSize }
+        return NSSize(
+            width: min(max(restoredSize.width, minimumWidth), max(minimumWidth, visibleFrame.width - screenMargin)),
+            height: min(max(restoredSize.height, minimumHeight), max(minimumHeight, visibleFrame.height - screenMargin))
+        )
+    }
+
+    func saveWindowPosition(_ origin: NSPoint) {
+        guard origin.x.isFinite, origin.y.isFinite else { return }
+        UserDefaults.standard.set(Double(origin.x), forKey: originXKey)
+        UserDefaults.standard.set(Double(origin.y), forKey: originYKey)
+    }
+
+    func restoreWindowOrigin(for frame: NSRect, screen: NSScreen? = NSScreen.main) -> NSPoint? {
+        guard UserDefaults.standard.object(forKey: originXKey) != nil,
+              UserDefaults.standard.object(forKey: originYKey) != nil else {
+            return nil
         }
-        return NSSize(width: width, height: height)
+
+        let restoredOrigin = NSPoint(
+            x: UserDefaults.standard.double(forKey: originXKey),
+            y: UserDefaults.standard.double(forKey: originYKey)
+        )
+        let restoredFrame = NSRect(origin: restoredOrigin, size: frame.size)
+        guard let visibleFrame = screen?.visibleFrame else { return restoredOrigin }
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - restoredFrame.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - restoredFrame.height)
+
+        return NSPoint(
+            x: min(max(restoredFrame.minX, visibleFrame.minX), maxX),
+            y: min(max(restoredFrame.minY, visibleFrame.minY), maxY)
+        )
+    }
+}
+
+// MARK: - Preview Panel
+
+final class ResizablePreviewPanel: NSPanel {
+    private let resizeCursorInset: CGFloat = 5
+    private var isShowingResizeCursor = false
+
+    init(contentViewController: NSViewController) {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        self.contentViewController = contentViewController
+        acceptsMouseMovedEvents = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateResizeCursor(at: event.locationInWindow)
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        resetResizeCursorIfNeeded()
+        super.mouseExited(with: event)
+    }
+
+    private func updateResizeCursor(at windowLocation: NSPoint) {
+        guard styleMask.contains(.resizable) else {
+            resetResizeCursorIfNeeded()
+            return
+        }
+
+        let bounds = NSRect(origin: .zero, size: frame.size)
+        let location = windowLocation
+        guard bounds.contains(location) else {
+            resetResizeCursorIfNeeded()
+            return
+        }
+
+        let nearLeft = location.x <= bounds.minX + resizeCursorInset
+        let nearRight = location.x >= bounds.maxX - resizeCursorInset
+        let nearBottom = location.y <= bounds.minY + resizeCursorInset
+        let nearTop = location.y >= bounds.maxY - resizeCursorInset
+
+        guard nearLeft || nearRight || nearBottom || nearTop else {
+            resetResizeCursorIfNeeded()
+            return
+        }
+
+        resizeCursor(
+            nearLeft: nearLeft,
+            nearRight: nearRight,
+            nearBottom: nearBottom,
+            nearTop: nearTop
+        ).set()
+        isShowingResizeCursor = true
+    }
+
+    private func resetResizeCursorIfNeeded() {
+        guard isShowingResizeCursor else { return }
+        NSCursor.arrow.set()
+        isShowingResizeCursor = false
+    }
+
+    private func resizeCursor(
+        nearLeft: Bool,
+        nearRight: Bool,
+        nearBottom: Bool,
+        nearTop: Bool
+    ) -> NSCursor {
+        if nearLeft || nearRight {
+            return NSCursor.resizeLeftRight
+        }
+        return NSCursor.resizeUpDown
     }
 }
 
@@ -103,6 +265,7 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
     private var didInvokeOnClose = false
     private var isAnimatingClose = false
     private var isClosingAfterAnimation = false
+    private var isOpeningAnimation = false
 
     init(
         onClose: @escaping () -> Void,
@@ -146,9 +309,26 @@ class PreviewWindowDelegate: NSObject, NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
-        guard !isAnimatingClose, !isClosingAfterAnimation else { return }
+        guard !isOpeningAnimation, !isAnimatingClose, !isClosingAfterAnimation else { return }
         guard let window = notification.object as? NSWindow else { return }
-        PreviewWindowSizeManager.shared.saveWindowSize(window.frame.size)
+        PreviewWindowSizeManager.shared.saveWindowSize(window.contentLayoutRect.size)
+        PreviewWindowSizeManager.shared.saveWindowPosition(window.frame.origin)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !isOpeningAnimation, !isAnimatingClose, !isClosingAfterAnimation else { return }
+        guard let window = notification.object as? NSWindow else { return }
+        PreviewWindowSizeManager.shared.saveWindowPosition(window.frame.origin)
+    }
+
+    func beginOpeningAnimation() {
+        isOpeningAnimation = true
+    }
+
+    func finishOpeningAnimation(for window: NSWindow) {
+        isOpeningAnimation = false
+        PreviewWindowSizeManager.shared.saveWindowSize(window.contentLayoutRect.size)
+        PreviewWindowSizeManager.shared.saveWindowPosition(window.frame.origin)
     }
 
     private func animateClose(_ window: NSWindow) {
@@ -212,18 +392,33 @@ class CenteringClipView: NSClipView {
 // MARK: - Observing Scroll View
 
 final class ObservingScrollView: NSScrollView {
-    var onUserZoom: (() -> Void)?
+    var onMagnify: ((CGFloat) -> Void)?
 
     override func magnify(with event: NSEvent) {
-        super.magnify(with: event)
-        onUserZoom?()
+        onMagnify?(event.magnification)
     }
 
     override func scrollWheel(with event: NSEvent) {
-        super.scrollWheel(with: event)
-        if event.phase == .changed || event.momentumPhase == .changed {
-            onUserZoom?()
+        let dx = event.scrollingDeltaX
+        let dy = event.scrollingDeltaY
+
+        if abs(dx) > 0.5 && abs(dy) > 0.5 {
+            // Both axes have movement: apply them together to enable diagonal scrolling.
+            // NSScrollView's default scrollWheel locks to the dominant axis at gesture start.
+            let origin = contentView.bounds.origin
+            contentView.scroll(to: NSPoint(x: origin.x - dx, y: origin.y + dy))
+            reflectScrolledClipView(contentView)
+        } else {
+            super.scrollWheel(with: event)
         }
+    }
+}
+
+final class ZoomingImageView: NSImageView {
+    var onMagnify: ((CGFloat) -> Void)?
+
+    override func magnify(with event: NSEvent) {
+        onMagnify?(event.magnification)
     }
 }
 
@@ -232,8 +427,12 @@ final class ObservingScrollView: NSScrollView {
 struct ZoomableAsyncImageView: NSViewRepresentable {
     var url: URL
     var allowFullImageLoad: Bool = true
+    var controller: ZoomController? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
+#if DEBUG
+        print("[ZoomableAsyncImageView] makeNSView url=\(url.standardizedFileURL.path)")
+#endif
         let scrollView = ObservingScrollView()
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
@@ -241,9 +440,9 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.backgroundColor = .clear
 
-        let imageView = NSImageView()
+        let imageView = ZoomingImageView()
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.translatesAutoresizingMaskIntoConstraints = true
 
         let clipView = CenteringClipView()
         clipView.documentView = imageView
@@ -260,20 +459,39 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 
         // Pan gesture for drag-to-move when zoomed in
         let panGesture = NSPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        panGesture.delegate = context.coordinator
         imageView.addGestureRecognizer(panGesture)
 
-        scrollView.allowsMagnification = true
+        let scrollMagnificationGesture = NSMagnificationGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleMagnification(_:))
+        )
+        scrollMagnificationGesture.delegate = context.coordinator
+        scrollView.addGestureRecognizer(scrollMagnificationGesture)
+
+        let imageMagnificationGesture = NSMagnificationGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleMagnification(_:))
+        )
+        imageMagnificationGesture.delegate = context.coordinator
+        imageView.addGestureRecognizer(imageMagnificationGesture)
+
+        scrollView.allowsMagnification = false
         scrollView.minMagnification = 0.05
         scrollView.maxMagnification = 10.0
         scrollView.contentView.postsBoundsChangedNotifications = true
         let coordinator = context.coordinator
-        scrollView.onUserZoom = { [weak coordinator] in
-            coordinator?.userAdjustedZoom()
+        scrollView.onMagnify = { [weak coordinator] magnificationDelta in
+            coordinator?.magnify(by: magnificationDelta)
+        }
+        imageView.onMagnify = { [weak coordinator] magnificationDelta in
+            coordinator?.magnify(by: magnificationDelta)
         }
 
         context.coordinator.imageView = imageView
         context.coordinator.scrollView = scrollView
         context.coordinator.setAllowsFullImageLoad(allowFullImageLoad)
+        context.coordinator.syncWithController()
         context.coordinator.observeBoundsChanges()
         context.coordinator.loadImage(from: url)
 
@@ -281,8 +499,13 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
+#if DEBUG
+        print("[ZoomableAsyncImageView] updateNSView url=\(url.standardizedFileURL.path) current=\(context.coordinator.currentURL?.path ?? "nil")")
+#endif
+        context.coordinator.parent = self
+        context.coordinator.syncWithController()
         context.coordinator.setAllowsFullImageLoad(allowFullImageLoad)
-        if context.coordinator.currentURL != url {
+        if context.coordinator.currentURL != url.standardizedFileURL {
             context.coordinator.loadImage(from: url)
         } else {
             context.coordinator.applyInitialFitIfNeeded()
@@ -293,7 +516,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         Coordinator(self)
     }
 
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, NSGestureRecognizerDelegate, ZoomControlTarget {
         var parent: ZoomableAsyncImageView
         weak var imageView: NSImageView?
         weak var scrollView: NSScrollView?
@@ -305,40 +528,27 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         private var userHasAdjustedZoom = false
         private let actualPixelScale: CGFloat = 1.0
         private let zoomToggleTolerance: CGFloat = 0.01
-        // Preview loading is staged for slow SD cards: show an in-memory grid
-        // thumbnail immediately, then a small ImageIO preview, and only start the
-        // full image load after the selection has stayed on the same file briefly.
-        private let previewPixelSize = 768
-        private let fullImageLoadDelay: TimeInterval = 0.75
-        private let isFullImageLoadingDisabledForThumbnailPreviewTest = false
-        private let previewImageQueue: OperationQueue = {
-            let queue = OperationQueue()
-            queue.name = "dev.etokoji.preview-thumbnail-loader"
-            queue.qualityOfService = .userInitiated
-            queue.maxConcurrentOperationCount = 1
-            return queue
-        }()
-        private let fullImageQueue: OperationQueue = {
-            let queue = OperationQueue()
-            queue.name = "dev.etokoji.preview-full-image-loader"
-            queue.qualityOfService = .utility
-            queue.maxConcurrentOperationCount = 1
-            return queue
-        }()
+        // The enlarged preview is used for inspecting one selected photo at a time,
+        // so it decodes the full image immediately and resets each new image to 100%.
         private var loadGeneration = 0
-        private var scheduledFullLoadGeneration: Int?
         private var allowsFullImageLoad = true
         private var allowsCurrentImageUpscaling = false
         private var panStartOrigin: NSPoint?
-        private var previewWasSkippedForCurrentLoad = false
+        private var persistedMagnification: CGFloat? = nil
+        private var originalImageSize: NSSize = .zero
+        private var currentScale: CGFloat = 1.0
+        private var needsInitialFit = false
 
         init(_ parent: ZoomableAsyncImageView) {
             self.parent = parent
         }
 
+        func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: NSGestureRecognizer) -> Bool {
+            true
+        }
+
         deinit {
-            previewImageQueue.cancelAllOperations()
-            fullImageQueue.cancelAllOperations()
+            parent.controller?.clearTarget(self)
             if let observer = boundsObserver {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -347,20 +557,6 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         func setAllowsFullImageLoad(_ isAllowed: Bool) {
             guard allowsFullImageLoad != isAllowed else { return }
             allowsFullImageLoad = isAllowed
-
-            if isAllowed {
-                if let currentURL {
-                    // Restart the preview that was skipped during rapid navigation.
-                    if previewWasSkippedForCurrentLoad {
-                        previewWasSkippedForCurrentLoad = false
-                        enqueuePreviewOperation(for: currentURL, generation: loadGeneration)
-                    }
-                    scheduleFullImageLoad(for: currentURL, generation: loadGeneration)
-                }
-            } else {
-                scheduledFullLoadGeneration = nil
-                fullImageQueue.cancelAllOperations()
-            }
         }
 
         func observeBoundsChanges() {
@@ -381,116 +577,98 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             userHasAdjustedZoom = false
             loadGeneration += 1
             let generation = loadGeneration
-            scheduledFullLoadGeneration = nil
-            previewWasSkippedForCurrentLoad = false
+            persistedMagnification = nil
+            currentScale = actualPixelScale
+            lastAppliedFitScale = nil
+            needsInitialFit = true
 
-            previewImageQueue.cancelAllOperations()
-            fullImageQueue.cancelAllOperations()
-
-            // First paint: reuse the thumbnail already decoded for the grid if it
-            // exists. This avoids touching the SD card when arrow-key navigation
-            // lands on an item whose grid thumbnail is already in memory.
-            if let cachedThumbnail = ThumbnailGenerator.shared.cachedThumbnail(for: requestURL) {
-                displayLoadedImage(cachedThumbnail, allowsUpscaling: true)
-                scheduleFullImageLoad(for: requestURL, generation: generation)
-                // During rapid navigation the cached thumbnail is sufficient; skip the
-                // SD card read for the preview. setAllowsFullImageLoad(true) will
-                // restart it when the key is released.
-                if !allowsFullImageLoad {
-                    previewWasSkippedForCurrentLoad = true
-                    return
-                }
-            } else {
-                imageView?.image = nil
-                imageView?.frame.size = .zero
-            }
-
-            // Second paint: generate a small preview on its own queue. It can still
-            // block on SD card I/O, but it is cheaper than decoding the full image.
-            enqueuePreviewOperation(for: requestURL, generation: generation)
-        }
-
-        private func enqueuePreviewOperation(for requestURL: URL, generation: Int) {
-            var previewOperation: BlockOperation!
-            previewOperation = BlockOperation { [weak self, weak previewOperation] in
-                guard previewOperation?.isCancelled == false else { return }
-
-                if let previewImage = Self.previewThumbnail(for: requestURL, maxPixelSize: self?.previewPixelSize ?? 768) {
-                    DispatchQueue.main.async { [weak self, weak previewOperation] in
-                        guard let self,
-                              previewOperation?.isCancelled == false,
-                              self.currentURL == requestURL,
-                              self.loadGeneration == generation
-                        else { return }
-                        self.displayLoadedImage(previewImage, allowsUpscaling: true)
-                        self.scheduleFullImageLoad(for: requestURL, generation: generation)
-                    }
-                }
-            }
-            previewImageQueue.addOperation(previewOperation)
+#if DEBUG
+            debugLog("loadImage generation=\(generation) url=\(requestURL.path)")
+#endif
+            loadFullImageImmediately(from: requestURL, generation: generation)
         }
 
         private func displayLoadedImage(_ image: NSImage, allowsUpscaling: Bool) {
-            guard let imageView else { return }
+            guard let imageView else {
+#if DEBUG
+                debugLog("displayLoadedImage skipped: imageView is nil")
+#endif
+                return
+            }
             allowsCurrentImageUpscaling = allowsUpscaling
+            originalImageSize = image.size
             imageView.image = image
-            imageView.frame.size = image.size
-            applyInitialFitIfNeeded(force: true)
-        }
-
-        private func scheduleFullImageLoad(for url: URL, generation: Int) {
-            // Full-image reads are intentionally delayed because NSImage(contentsOf:)
-            // cannot be cancelled once the SD card read has started, and it can starve
-            // later thumbnail/preview reads during held-arrow navigation.
-            guard !isFullImageLoadingDisabledForThumbnailPreviewTest else { return }
-            guard allowsFullImageLoad else { return }
-            guard scheduledFullLoadGeneration != generation else { return }
-            scheduledFullLoadGeneration = generation
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + fullImageLoadDelay) { [weak self] in
-                guard let self,
-                      self.currentURL == url,
-                      self.loadGeneration == generation
-                else { return }
-                self.enqueueFullImageLoad(for: url, generation: generation)
+            imageView.frame = NSRect(origin: .zero, size: image.size)
+            didApplyInitialFit = false
+            userHasAdjustedZoom = false
+            if let scrollView {
+                scrollView.documentView = imageView
+                scrollView.contentView.scroll(to: .zero)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+#if DEBUG
+            debugLog("displayLoadedImage size=\(image.size) isValid=\(image.isValid) allowsUpscaling=\(allowsUpscaling) frame=\(imageView.frame)")
+#endif
+            applyPendingInitialFit()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyPendingInitialFit()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.applyPendingInitialFit()
             }
         }
 
-        private func enqueueFullImageLoad(for url: URL, generation: Int) {
-            var fullOperation: BlockOperation!
-            fullOperation = BlockOperation { [weak self, weak fullOperation] in
-                guard fullOperation?.isCancelled == false else { return }
-                guard let fullImage = NSImage(contentsOf: url) else { return }
-
-                DispatchQueue.main.async { [weak self, weak fullOperation] in
-                    guard let self,
-                          fullOperation?.isCancelled == false,
-                          self.currentURL == url,
-                          self.loadGeneration == generation
-                    else { return }
-                    self.displayLoadedImage(fullImage, allowsUpscaling: false)
-                }
+        private func loadFullImageImmediately(from url: URL, generation: Int) {
+            guard allowsFullImageLoad else {
+#if DEBUG
+                debugLog("loadFullImageImmediately skipped: allowsFullImageLoad=false generation=\(generation)")
+#endif
+                return
             }
-            fullImageQueue.addOperation(fullOperation)
+
+#if DEBUG
+            let fileExists = FileManager.default.fileExists(atPath: url.path)
+            debugLog("full load start generation=\(generation) exists=\(fileExists) url=\(url.path)")
+#endif
+            guard let decoded = Self.decodedFullImage(from: url) else {
+#if DEBUG
+                debugLog("full load failed: ImageIO returned nil generation=\(generation)")
+#endif
+                return
+            }
+#if DEBUG
+            debugLog("full load decoded generation=\(generation) size=\(decoded.size) pixels=\(decoded.cgImage.width)x\(decoded.cgImage.height)")
+#endif
+
+            guard currentURL == url else {
+#if DEBUG
+                debugLog("full load ignored: currentURL changed generation=\(generation) current=\(currentURL?.lastPathComponent ?? "nil") loaded=\(url.lastPathComponent)")
+#endif
+                return
+            }
+            guard loadGeneration == generation else {
+#if DEBUG
+                debugLog("full load ignored: generation changed loaded=\(generation) current=\(loadGeneration)")
+#endif
+                return
+            }
+
+            let fullImage = NSImage(cgImage: decoded.cgImage, size: decoded.size)
+            displayLoadedImage(fullImage, allowsUpscaling: false)
         }
 
-        private static func previewThumbnail(for url: URL, maxPixelSize: Int) -> NSImage? {
-            guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
+        private static func decodedFullImage(from url: URL) -> (cgImage: CGImage, size: NSSize)? {
+            let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else {
                 return nil
             }
 
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
-            ]
-
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+            let imageOptions = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+            guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, imageOptions) else {
                 return nil
             }
 
-            return NSImage(
+            return (
                 cgImage: cgImage,
                 size: NSSize(width: cgImage.width, height: cgImage.height)
             )
@@ -498,12 +676,12 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 
         @objc func handleDoubleClick(gesture: NSClickGestureRecognizer) {
             guard let scrollView = scrollView ?? imageView?.enclosingScrollView else { return }
-            let current = scrollView.magnification
+            let current = currentScale
             if abs(current - actualPixelScale) < zoomToggleTolerance {
                 userHasAdjustedZoom = false
-                applyInitialFitIfNeeded(force: true, animated: true)
+                applyInitialFitIfNeeded(force: true, clearPersisted: true, animated: true, center: true)
             } else {
-                zoomToActualPixels(in: scrollView, animated: true)
+                zoomToActualPixels(in: scrollView, animated: true, center: true)
             }
         }
 
@@ -512,7 +690,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             guard let scrollView = scrollView else { return }
             let fitScale = lastAppliedFitScale ?? scrollView.minMagnification
             // Only pan when zoomed beyond fit scale
-            guard scrollView.magnification > fitScale * 1.01 else {
+            guard currentScale > fitScale * 1.01 else {
                 panStartOrigin = nil
                 return
             }
@@ -524,7 +702,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                 guard let startOrigin = panStartOrigin else { return }
                 let translation = gesture.translation(in: scrollView)
                 // Divide by magnification to convert screen pixels → document coordinates
-                let mag = scrollView.magnification
+                let mag = currentScale
                 let newOrigin = NSPoint(
                     x: startOrigin.x - translation.x / mag,
                     y: startOrigin.y + translation.y / mag
@@ -538,15 +716,89 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             }
         }
 
-        func applyInitialFitIfNeeded(force: Bool = false, animated: Bool = false) {
+        @objc func handleMagnification(_ gesture: NSMagnificationGestureRecognizer) {
+            guard gesture.state == .began || gesture.state == .changed else { return }
+            let delta = gesture.magnification
+            guard abs(delta) > 0.0001 else { return }
+            magnify(by: delta)
+            gesture.magnification = 0
+        }
+
+        func applyInitialFitIfNeeded(force: Bool = false, clearPersisted: Bool = false, animated: Bool = false, center: Bool = false) {
+            if clearPersisted { persistedMagnification = nil }
             guard force || (!didApplyInitialFit && !userHasAdjustedZoom) else { return }
             guard let scrollView = scrollView ?? imageView?.enclosingScrollView else { return }
+
+            // Restore the zoom level the user previously set instead of fitting
+            if let mag = persistedMagnification {
+                let clamped = max(min(mag, scrollView.maxMagnification), 0.01)
+                applyScale(clamped, in: scrollView, animated: false, center: center)
+                didApplyInitialFit = true
+                userHasAdjustedZoom = true
+#if DEBUG
+                debugLog("applyInitialFitIfNeeded: restored persisted magnification \(clamped)")
+#endif
+                return
+            }
+
             guard let targetScale = calculateFitScale(for: scrollView) else { return }
 #if DEBUG
             debugLog("applyInitialFitIfNeeded(force: \(force), animated: \(animated)) -> \(targetScale)")
 #endif
-            applyFit(scale: targetScale, in: scrollView, animated: animated)
+            applyFit(scale: targetScale, in: scrollView, animated: animated, center: center)
             didApplyInitialFit = true
+            needsInitialFit = false
+        }
+
+        private func applyPendingInitialFit() {
+            guard needsInitialFit, !userHasAdjustedZoom else { return }
+            applyInitialFitIfNeeded(force: true, clearPersisted: true, center: true)
+        }
+
+        func applyActualSizeIfNeeded(force: Bool = false, animated: Bool = false, center: Bool = false) {
+            guard force || !didApplyInitialFit else { return }
+            guard let scrollView = scrollView ?? imageView?.enclosingScrollView else {
+#if DEBUG
+                debugLog("applyActualSizeIfNeeded skipped: scrollView is nil")
+#endif
+                return
+            }
+
+            zoomToActualPixels(in: scrollView, animated: animated, center: center)
+            didApplyInitialFit = true
+            lastAppliedFitScale = nil
+            reportCurrentZoom()
+#if DEBUG
+            debugLog("applyActualSizeIfNeeded bounds=\(scrollView.bounds) contentBounds=\(scrollView.contentView.bounds) documentFrame=\(scrollView.documentView?.frame ?? .zero)")
+#endif
+        }
+
+        func syncWithController() {
+            guard let controller = parent.controller else { return }
+            controller.setTarget(self)
+            reportCurrentZoom()
+        }
+
+        func zoomToFitFromController() {
+            applyInitialFitIfNeeded(force: true, clearPersisted: true, animated: false, center: true)
+            reportCurrentZoom()
+        }
+
+        func zoomToActualSizeFromController() {
+            guard let scrollView = scrollView else { return }
+            zoomToActualPixels(in: scrollView, animated: false, center: true)
+            reportCurrentZoom()
+        }
+
+        func setMagnificationFromController(_ magnification: CGFloat) {
+            guard let scrollView = scrollView else { return }
+            applyScale(magnification, in: scrollView, animated: false, center: false)
+            userHasAdjustedZoom = true
+            persistedMagnification = currentScale
+        }
+
+        private func reportCurrentZoom() {
+            parent.controller?.magnification = currentScale
         }
 
         private func handleBoundsChange() {
@@ -558,7 +810,12 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 #if DEBUG
                 self.debugLog("bounds change detected (content size: \(scrollView.contentView.bounds.size))")
 #endif
-                self.performBoundsAwareFitIfNeeded(scrollView: scrollView)
+                if self.needsInitialFit || (!self.didApplyInitialFit && !self.userHasAdjustedZoom) {
+                    self.applyPendingInitialFit()
+                } else {
+                    self.performBoundsAwareFitIfNeeded(scrollView: scrollView)
+                }
+                self.reportCurrentZoom()
             }
         }
 
@@ -569,11 +826,11 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 
             guard let lastFit = lastAppliedFitScale else { return }
             let tolerance: CGFloat = 0.002
-            if abs(scrollView.magnification - lastFit) <= tolerance {
+            if abs(currentScale - lastFit) <= tolerance {
 #if DEBUG
-                debugLog("auto-refit to \(targetScale) (current \(scrollView.magnification))")
+                debugLog("auto-refit to \(targetScale) (current \(currentScale))")
 #endif
-                applyFit(scale: targetScale, in: scrollView, animated: false)
+                applyFit(scale: targetScale, in: scrollView, animated: false, center: true)
             }
         }
 
@@ -582,7 +839,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                   imageSize.width > 0,
                   imageSize.height > 0 else { return nil }
 
-            let boundsSize = scrollView.bounds.size
+            let boundsSize = scrollView.contentView.bounds.size
             guard boundsSize.width > 0, boundsSize.height > 0 else { return nil }
 
             let scaleX = boundsSize.width / imageSize.width
@@ -590,34 +847,32 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             let fitScale = min(scaleX, scaleY)
             guard fitScale.isFinite, fitScale > 0 else { return nil }
 
-            return allowsCurrentImageUpscaling ? fitScale : min(fitScale, 1.0)
+            return fitScale
         }
 
-        private func applyFit(scale: CGFloat, in scrollView: NSScrollView, animated: Bool) {
+        private func applyFit(scale: CGFloat, in scrollView: NSScrollView, animated: Bool, center: Bool = false) {
             let targetScale = max(min(scale, scrollView.maxMagnification), 0.01)
             scrollView.minMagnification = min(targetScale, 0.05)
-
-            if animated {
-                NSAnimationContext.runAnimationGroup { _ in
-                    scrollView.animator().magnification = targetScale
-                }
-            } else {
-                scrollView.magnification = targetScale
-            }
+            applyScale(targetScale, in: scrollView, animated: animated, center: center)
 #if DEBUG
             debugLog("applyFit -> \(targetScale), userHasAdjusted = \(userHasAdjustedZoom)")
 #endif
             lastAppliedFitScale = targetScale
             userHasAdjustedZoom = false
+            reportCurrentZoom()
         }
 
-        func userAdjustedZoom() {
+        func magnify(by delta: CGFloat) {
+            guard let scrollView else { return }
+            let targetScale = currentScale * max(0.1, 1 + delta)
+            applyScale(targetScale, in: scrollView, animated: false, center: false)
 #if DEBUG
             if !userHasAdjustedZoom {
-                debugLog("user adjusted zoom (current magnification: \(scrollView?.magnification ?? -1))")
+                debugLog("user adjusted zoom (current magnification: \(currentScale))")
             }
 #endif
             userHasAdjustedZoom = true
+            persistedMagnification = currentScale
         }
 
 #if DEBUG
@@ -626,19 +881,65 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         }
 #endif
 
-        private func zoomToActualPixels(in scrollView: NSScrollView, animated: Bool) {
+        private func zoomToActualPixels(in scrollView: NSScrollView, animated: Bool, center: Bool = false) {
             let clamped = max(min(actualPixelScale, scrollView.maxMagnification), 0.01)
-            if animated {
-                NSAnimationContext.runAnimationGroup { _ in
-                    scrollView.animator().magnification = clamped
-                }
-            } else {
-                scrollView.magnification = clamped
-            }
+            applyScale(clamped, in: scrollView, animated: animated, center: center)
 #if DEBUG
             debugLog("zoomToActualPixels -> \(clamped)")
 #endif
             userHasAdjustedZoom = true
+            persistedMagnification = clamped
+            reportCurrentZoom()
+        }
+
+        private func applyScale(_ scale: CGFloat, in scrollView: NSScrollView, animated: Bool, center: Bool = false) {
+            guard let imageView, originalImageSize.width > 0, originalImageSize.height > 0 else { return }
+            let clamped = max(min(scale, scrollView.maxMagnification), scrollView.minMagnification)
+            let oldScale = max(currentScale, 0.0001)
+            let oldCenter = NSPoint(
+                x: scrollView.contentView.bounds.midX,
+                y: scrollView.contentView.bounds.midY
+            )
+            let newSize = NSSize(
+                width: originalImageSize.width * clamped,
+                height: originalImageSize.height * clamped
+            )
+            let newFrame = NSRect(origin: .zero, size: newSize)
+
+            if animated {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.12
+                    imageView.animator().frame = newFrame
+                }
+            } else {
+                imageView.frame = newFrame
+            }
+
+            currentScale = clamped
+            let newCenter = center
+                ? NSPoint(x: newSize.width / 2, y: newSize.height / 2)
+                : NSPoint(
+                    x: oldCenter.x / oldScale * clamped,
+                    y: oldCenter.y / oldScale * clamped
+                )
+            let newOrigin = NSPoint(
+                x: newCenter.x - scrollView.contentView.bounds.width / 2,
+                y: newCenter.y - scrollView.contentView.bounds.height / 2
+            )
+            scrollView.contentView.scroll(to: constrainedOrigin(newOrigin, documentSize: newSize, viewportSize: scrollView.contentView.bounds.size))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            reportCurrentZoom()
+        }
+
+        private func constrainedOrigin(_ origin: NSPoint, documentSize: NSSize, viewportSize: NSSize) -> NSPoint {
+            NSPoint(
+                x: documentSize.width <= viewportSize.width
+                    ? (documentSize.width - viewportSize.width) / 2
+                    : min(max(origin.x, 0), documentSize.width - viewportSize.width),
+                y: documentSize.height <= viewportSize.height
+                    ? (documentSize.height - viewportSize.height) / 2
+                    : min(max(origin.y, 0), documentSize.height - viewportSize.height)
+            )
         }
     }
 }

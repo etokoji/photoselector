@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var actualGridWidth: CGFloat = 800
     @State private var previewWindow: NSWindow?
     @State private var previewWindowDelegate: PreviewWindowDelegate?
+    @State private var previewZoomController = ZoomController()
     @State private var selectedThumbnailScreenFrame: NSRect?
     // Bridge state to avoid publishing during view updates
     @State private var localSortMode: DateSortMode = .fileCreation
@@ -275,11 +276,18 @@ struct ContentView: View {
                 openPreviewWindow(for: selectedPhoto)
             }
         }
+        .onChange(of: viewModel.primarySelectedPhotoID) { _, _ in
+            guard showImagePreview, let selectedPhoto = viewModel.selectedPhoto else { return }
+            openPreviewWindow(for: selectedPhoto)
+        }
         .environment(viewModel)
         .focusedValue(\.viewModel, viewModel)
 #if os(macOS)
         .background(WindowTitleSetter(title: viewModel.windowTitle))
         .background(WindowInitialSizeSetter(size: initialWindowSize))
+        .background(WindowCloseObserver {
+            closePreviewWindowForMainWindowClose()
+        })
         .focusedValue(\.saveWindowLayoutDefaults) {
             WindowLayoutDefaults.saveCurrentLayout(
                 windowID: windowID,
@@ -364,12 +372,18 @@ struct ContentView: View {
         guard viewModel.selectedPhoto != nil else { return }
         showImagePreview = true
     }
+
+    private func closePreviewWindowForMainWindowClose() {
+        previewWindow?.close()
+        previewWindow = nil
+        previewWindowDelegate = nil
+        showImagePreview = false
+    }
     
     func openPreviewWindow(for photo: PhotoItem) {
-        let previewView = ImagePreviewWindowView(viewModel: viewModel, onClose: {
+        let previewView = ImagePreviewWindowView(viewModel: viewModel, photo: photo, zoomController: previewZoomController, onClose: {
             showImagePreview = false
         })
-        let hostingController = NSHostingController(rootView: previewView)
 
         let windowDelegate = PreviewWindowDelegate(
             onClose: {
@@ -381,23 +395,36 @@ struct ContentView: View {
         )
 
         if let window = previewWindow {
-            window.contentViewController = hostingController
-            window.delegate = windowDelegate
-            previewWindowDelegate = windowDelegate
-            window.makeKeyAndOrderFront(nil)
+            if let hostingController = window.contentViewController as? NSHostingController<ImagePreviewWindowView> {
+                hostingController.rootView = previewView
+            } else {
+                window.contentViewController = NSHostingController(rootView: previewView)
+            }
+            window.orderFront(nil)
             return
         }
 
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "Image Preview"
-        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+        let hostingController = NSHostingController(rootView: previewView)
+        let panel = ResizablePreviewPanel(contentViewController: hostingController)
+        panel.title = "Image Preview"
+        panel.styleMask = [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel]
+        panel.becomesKeyOnlyIfNeeded = true
+        let window = panel
 
-        // Restore saved window size or use default
-        let savedSize = PreviewWindowSizeManager.shared.restoreWindowSize()
+        // Restore the saved content size, keeping it inside the current screen.
+        let savedSize = PreviewWindowSizeManager.shared.restoreWindowSize(screen: window.screen ?? NSScreen.main)
         window.setContentSize(savedSize)
-        window.center()
+        if let savedOrigin = PreviewWindowSizeManager.shared.restoreWindowOrigin(
+            for: window.frame,
+            screen: window.screen ?? NSScreen.main
+        ) {
+            window.setFrameOrigin(savedOrigin)
+        } else {
+            window.center()
+        }
 
         window.delegate = windowDelegate
+        windowDelegate.beginOpeningAnimation()
         animatePreviewWindowOpen(window, from: selectedThumbnailScreenFrame)
 
         previewWindow = window
@@ -411,7 +438,7 @@ struct ContentView: View {
 
         window.alphaValue = sourceFrame == nil ? 0 : 0.25
         window.setFrame(initialFrame, display: false)
-        window.makeKeyAndOrderFront(nil)
+        window.orderFront(nil)
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = sourceFrame == nil ? 0.22 : 0.5
@@ -420,6 +447,8 @@ struct ContentView: View {
                 : CAMediaTimingFunction(controlPoints: 0.42, 0.0, 0.2, 1.0)
             window.animator().alphaValue = 1
             window.animator().setFrame(finalFrame, display: true)
+        } completionHandler: {
+            (window.delegate as? PreviewWindowDelegate)?.finishOpeningAnimation(for: window)
         }
     }
 
@@ -3048,6 +3077,58 @@ private struct WindowInitialSizeSetter: NSViewRepresentable {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
             nsView.applySizeIfNeeded()
+        }
+    }
+}
+
+private struct WindowCloseObserver: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeNSView(context: Context) -> WindowCloseObserverView {
+        let view = WindowCloseObserverView()
+        view.onClose = onClose
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowCloseObserverView, context: Context) {
+        nsView.onClose = onClose
+        nsView.updateObservedWindow()
+    }
+}
+
+private final class WindowCloseObserverView: NSView {
+    var onClose: (() -> Void)?
+    private weak var observedWindow: NSWindow?
+    private var observer: NSObjectProtocol?
+
+    deinit {
+        removeObserver()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateObservedWindow()
+    }
+
+    func updateObservedWindow() {
+        guard observedWindow !== window else { return }
+        removeObserver()
+        observedWindow = window
+        guard let window else { return }
+
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.onClose?()
+        }
+    }
+
+    private func removeObserver() {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
         }
     }
 }
