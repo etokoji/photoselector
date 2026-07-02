@@ -413,8 +413,14 @@ final class ObservingScrollView: NSScrollView {
         if abs(dx) > 0.5 && abs(dy) > 0.5 {
             // Both axes have movement: apply them together to enable diagonal scrolling.
             // NSScrollView's default scrollWheel locks to the dominant axis at gesture start.
+            // Constrain to the document bounds; scroll(to:) alone would let the image
+            // leave the viewport entirely.
             let origin = contentView.bounds.origin
-            contentView.scroll(to: NSPoint(x: origin.x - dx, y: origin.y + dy))
+            let proposed = NSRect(
+                origin: NSPoint(x: origin.x - dx, y: origin.y + dy),
+                size: contentView.bounds.size
+            )
+            contentView.scroll(to: contentView.constrainBoundsRect(proposed).origin)
             reflectScrolledClipView(contentView)
         } else {
             super.scrollWheel(with: event)
@@ -715,8 +721,10 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                     x: startOrigin.x - translation.x / mag,
                     y: startOrigin.y + translation.y / mag
                 )
-                scrollView.contentView.scroll(to: newOrigin)
-                scrollView.reflectScrolledClipView(scrollView.contentView)
+                let clipView = scrollView.contentView
+                let proposed = NSRect(origin: newOrigin, size: clipView.bounds.size)
+                clipView.scroll(to: clipView.constrainBoundsRect(proposed).origin)
+                scrollView.reflectScrolledClipView(clipView)
             case .ended, .cancelled, .failed:
                 panStartOrigin = nil
             default:
