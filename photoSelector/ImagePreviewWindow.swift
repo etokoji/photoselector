@@ -248,10 +248,18 @@ final class ResizablePreviewPanel: NSPanel {
         nearBottom: Bool,
         nearTop: Bool
     ) -> NSCursor {
-        if nearLeft || nearRight {
-            return NSCursor.resizeLeftRight
+        let position: NSCursor.FrameResizePosition
+        switch (nearLeft, nearRight, nearBottom, nearTop) {
+        case (true, _, true, _): position = .bottomLeft
+        case (true, _, _, true): position = .topLeft
+        case (_, true, true, _): position = .bottomRight
+        case (_, true, _, true): position = .topRight
+        case (true, _, _, _): position = .left
+        case (_, true, _, _): position = .right
+        case (_, _, true, _): position = .bottom
+        default: position = .top
         }
-        return NSCursor.resizeUpDown
+        return NSCursor.frameResize(position: position, directions: .all)
     }
 }
 
