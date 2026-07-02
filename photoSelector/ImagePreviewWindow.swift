@@ -182,6 +182,7 @@ class PreviewWindowSizeManager {
 final class ResizablePreviewPanel: NSPanel {
     private let resizeCursorInset: CGFloat = 5
     private var isShowingResizeCursor = false
+    private var magnifyMonitor: Any?
 
     init(contentViewController: NSViewController) {
         super.init(
@@ -192,6 +193,19 @@ final class ResizablePreviewPanel: NSPanel {
         )
         self.contentViewController = contentViewController
         acceptsMouseMovedEvents = true
+        // NSApplication drops magnify gesture events addressed to a non-key
+        // nonactivating panel before they reach the window, so deliver them manually.
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+            guard let self, event.window === self else { return event }
+            self.sendEvent(event)
+            return nil
+        }
+    }
+
+    deinit {
+        if let monitor = magnifyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -475,20 +489,6 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         let panGesture = NSPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
         panGesture.delegate = context.coordinator
         imageView.addGestureRecognizer(panGesture)
-
-        let scrollMagnificationGesture = NSMagnificationGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleMagnification(_:))
-        )
-        scrollMagnificationGesture.delegate = context.coordinator
-        scrollView.addGestureRecognizer(scrollMagnificationGesture)
-
-        let imageMagnificationGesture = NSMagnificationGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.handleMagnification(_:))
-        )
-        imageMagnificationGesture.delegate = context.coordinator
-        imageView.addGestureRecognizer(imageMagnificationGesture)
 
         scrollView.allowsMagnification = false
         scrollView.minMagnification = 0.05
