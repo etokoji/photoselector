@@ -335,6 +335,11 @@ struct ContentView: View {
         }
 
         if press.phase.contains(.down) || press.phase.contains(.repeat) {
+            if press.modifiers.contains(.option) {
+                guard direction == .up || direction == .down else { return .ignored }
+                viewModel.moveFolderSelection(up: direction == .up)
+                return .handled
+            }
             beginArrowKeyNavigation()
             viewModel.moveSelection(direction: direction, columns: actualColumns)
             viewModel.prefetchAdjacentThumbnails(direction: direction, columns: actualColumns)
@@ -1248,22 +1253,28 @@ struct FolderTreeView: View {
     @ViewBuilder
     private var treeContent: some View {
 #if os(macOS)
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(folderTree) { item in
-                    FolderTreeNode(
-                        item: item,
-                        depth: 0,
-                        selectedFolderURL: $selectedFolderURL,
-                        panelKind: panelKind,
-                        localSelection: $localSelection,
-                        onSelect: selectFolder
-                    )
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(folderTree) { item in
+                        FolderTreeNode(
+                            item: item,
+                            depth: 0,
+                            selectedFolderURL: $selectedFolderURL,
+                            panelKind: panelKind,
+                            localSelection: $localSelection,
+                            onSelect: selectFolder
+                        )
+                    }
                 }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: selectedFolderURL) { _, newValue in
+                guard let newValue else { return }
+                proxy.scrollTo(newValue, anchor: nil)
+            }
         }
 #else
         List(folderTree, children: \.children) { item in
@@ -1312,7 +1323,8 @@ struct FolderTreeNode: View {
                 folderRow
             }
             .padding(.leading, CGFloat(depth) * folderTreeIndent)
-            
+            .id(item.id)
+
             if hasChildren && isExpanded {
                 ForEach(item.children ?? []) { child in
                     FolderTreeNode(

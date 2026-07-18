@@ -523,6 +523,59 @@ struct FolderPaneState: Identifiable, Equatable {
             folderPanes[index].expandedFolderURLs = urls
         }
     }
+
+    func folderTree(for panel: FolderPanelKind) -> [FileSystemItem] {
+        switch panel {
+        case .primary:
+            return folderTree
+        case .secondary:
+            return secondaryFolderTree
+        case .dynamic(let id):
+            return folderPanes.first(where: { $0.id == id })?.folderTree ?? []
+        }
+    }
+
+    private func visibleFolderURLs(in panel: FolderPanelKind) -> [URL] {
+        var result: [URL] = []
+        func walk(_ items: [FileSystemItem]) {
+            for item in items {
+                result.append(item.id)
+                if let children = item.children, !children.isEmpty, isFolderExpanded(item.id, in: panel) {
+                    walk(children)
+                }
+            }
+        }
+        walk(folderTree(for: panel))
+        return result
+    }
+
+    func moveFolderSelection(up: Bool) {
+        let panel: FolderPanelKind
+        if let active = activeFolderPanel {
+            panel = active
+        } else if let firstPane = folderPanes.first {
+            panel = firstPane.kind
+        } else if !folderTree.isEmpty {
+            panel = .primary
+        } else if !secondaryFolderTree.isEmpty {
+            panel = .secondary
+        } else {
+            return
+        }
+
+        let visible = visibleFolderURLs(in: panel)
+        guard !visible.isEmpty else { return }
+
+        guard let selected = selectedFolderURL(for: panel)?.standardizedFileURL,
+              let index = visible.firstIndex(where: { $0.standardizedFileURL == selected }) else {
+            setSelectedFolderURL(visible[0], for: panel)
+            return
+        }
+
+        let newIndex = up ? index - 1 : index + 1
+        guard visible.indices.contains(newIndex) else { return }
+        setSelectedFolderURL(visible[newIndex], for: panel)
+    }
     
     func shouldShowEjectVolumeButton(for panel: FolderPanelKind, item: FileSystemItem) -> Bool {
         guard let root = rootFolderURL(for: panel) else { return false }
