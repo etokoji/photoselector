@@ -335,11 +335,19 @@ struct ContentView: View {
         }
 
         if press.phase.contains(.down) || press.phase.contains(.repeat) {
-            // Option+Up/Down: move selection in the folder tree instead of the photo grid
+            // Option+arrows operate on the folder tree instead of the photo grid
             if press.modifiers.contains(.option) {
-                guard direction == .up || direction == .down else { return .ignored }
-                viewModel.moveFolderSelection(up: direction == .up)
-                return .handled
+                switch direction {
+                case .up, .down:
+                    viewModel.moveFolderSelection(up: direction == .up)
+                    return .handled
+                case .right:
+                    viewModel.expandSelectedFolder()
+                    return .handled
+                case .left:
+                    viewModel.collapseSelectedFolder()
+                    return .handled
+                }
             }
             beginArrowKeyNavigation()
             viewModel.moveSelection(direction: direction, columns: actualColumns)

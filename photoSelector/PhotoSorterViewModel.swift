@@ -565,19 +565,51 @@ struct FolderPaneState: Identifiable, Equatable {
         return result
     }
 
-    func moveFolderSelection(up: Bool) {
-        let panel: FolderPanelKind
+    private func folderNavigationPanel() -> FolderPanelKind? {
         if let active = activeFolderPanel {
-            panel = active
+            return active
         } else if let firstPane = folderPanes.first {
-            panel = firstPane.kind
+            return firstPane.kind
         } else if !folderTree.isEmpty {
-            panel = .primary
+            return .primary
         } else if !secondaryFolderTree.isEmpty {
-            panel = .secondary
-        } else {
-            return
+            return .secondary
         }
+        return nil
+    }
+
+    private func findFolderItem(_ url: URL, in items: [FileSystemItem]) -> FileSystemItem? {
+        let normalized = url.standardizedFileURL
+        for item in items {
+            if item.id.standardizedFileURL == normalized {
+                return item
+            }
+            if let children = item.children, let found = findFolderItem(url, in: children) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    func expandSelectedFolder() {
+        guard let panel = folderNavigationPanel(),
+              let selected = selectedFolderURL(for: panel),
+              let item = findFolderItem(selected, in: folderTree(for: panel)),
+              let children = item.children, !children.isEmpty else { return }
+        setFolderExpanded(selected, expanded: true, in: panel)
+    }
+
+    func collapseSelectedFolder() {
+        guard let panel = folderNavigationPanel(),
+              let selected = selectedFolderURL(for: panel),
+              let item = findFolderItem(selected, in: folderTree(for: panel)),
+              let children = item.children, !children.isEmpty,
+              isFolderExpanded(selected, in: panel) else { return }
+        setFolderExpanded(selected, expanded: false, in: panel)
+    }
+
+    func moveFolderSelection(up: Bool) {
+        guard let panel = folderNavigationPanel() else { return }
 
         let visible = visibleFolderURLs(in: panel)
         guard !visible.isEmpty else { return }
