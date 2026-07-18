@@ -335,6 +335,7 @@ struct ContentView: View {
         }
 
         if press.phase.contains(.down) || press.phase.contains(.repeat) {
+            // Option+Up/Down: move selection in the folder tree instead of the photo grid
             if press.modifiers.contains(.option) {
                 guard direction == .up || direction == .down else { return .ignored }
                 viewModel.moveFolderSelection(up: direction == .up)
@@ -1324,7 +1325,7 @@ struct FolderTreeNode: View {
             }
             .padding(.leading, CGFloat(depth) * folderTreeIndent)
             .id(item.id)
-
+            
             if hasChildren && isExpanded {
                 ForEach(item.children ?? []) { child in
                     FolderTreeNode(
@@ -2386,6 +2387,26 @@ struct SelectedPhotoPreview: View {
                 Text("Preview")
                     .font(.headline)
                 Spacer()
+
+                Button {
+                    if let photo {
+                        viewModel.rotatePreview(for: photo.url, clockwise: false)
+                    }
+                } label: {
+                    Image(systemName: "rotate.left")
+                }
+                .disabled(photo == nil)
+                .help("左に90°回転")
+
+                Button {
+                    if let photo {
+                        viewModel.rotatePreview(for: photo.url, clockwise: true)
+                    }
+                } label: {
+                    Image(systemName: "rotate.right")
+                }
+                .disabled(photo == nil)
+                .help("右に90°回転")
             }
             .padding()
             .background(Material.bar)
@@ -2398,7 +2419,8 @@ struct SelectedPhotoPreview: View {
                     PreviewImageView(
                         url: photo.url,
                         displaySize: geometry.size,
-                        allowsThumbnailGeneration: !viewModel.isArrowKeyNavigationActive
+                        allowsThumbnailGeneration: !viewModel.isArrowKeyNavigationActive,
+                        rotationDegrees: viewModel.previewRotation(for: photo.url)
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2479,9 +2501,16 @@ private struct PreviewImageView: View {
     let url: URL
     let displaySize: CGSize
     let allowsThumbnailGeneration: Bool
+    var rotationDegrees: Int = 0
     @State private var image: NSImage?
     @State private var isLoading = false
     @State private var didFail = false
+
+    // 90°/270° rotation swaps the fitting box, so size the image against the
+    // swapped dimensions before rotating it back into the visible frame.
+    private var isQuarterTurn: Bool {
+        rotationDegrees % 180 != 0
+    }
 
     private var thumbnailSize: CGFloat {
         guard allowsThumbnailGeneration else { return 160 }
@@ -2496,6 +2525,12 @@ private struct PreviewImageView: View {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .frame(
+                        width: isQuarterTurn ? displaySize.height : displaySize.width,
+                        height: isQuarterTurn ? displaySize.width : displaySize.height
+                    )
+                    .rotationEffect(.degrees(Double(rotationDegrees)))
+                    .frame(width: displaySize.width, height: displaySize.height)
             } else if didFail {
                 VStack {
                     Image(systemName: "exclamationmark.triangle")

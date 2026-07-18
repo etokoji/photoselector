@@ -57,8 +57,12 @@ struct ImagePreviewWindowView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZoomableAsyncImageView(url: photo.url, controller: zoomController)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZoomableAsyncImageView(
+                url: photo.url,
+                controller: zoomController,
+                rotationDegrees: viewModel.previewRotation(for: photo.url)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             // Bottom bar with filename, date, and zoom controls. Keep this out of
             // SwiftUI toolbar because non-activating panels can trigger AppKit
@@ -82,6 +86,20 @@ struct ImagePreviewWindowView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    viewModel.rotatePreview(for: photo.url, clockwise: false)
+                } label: {
+                    Image(systemName: "rotate.left")
+                }
+                .help("左に90°回転")
+
+                Button {
+                    viewModel.rotatePreview(for: photo.url, clockwise: true)
+                } label: {
+                    Image(systemName: "rotate.right")
+                }
+                .help("右に90°回転")
 
                 Text(zoomText)
                     .monospacedDigit()
@@ -456,6 +474,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
     var url: URL
     var allowFullImageLoad: Bool = true
     var controller: ZoomController? = nil
+    var rotationDegrees: Int = 0
 
     func makeNSView(context: Context) -> NSScrollView {
 #if DEBUG
@@ -522,6 +541,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         if context.coordinator.currentURL != url.standardizedFileURL {
             context.coordinator.loadImage(from: url)
         } else {
+            context.coordinator.setRotation(rotationDegrees)
             context.coordinator.applyInitialFitIfNeeded()
         }
     }
@@ -552,6 +572,10 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         private var originalImageSize: NSSize = .zero
         private var currentScale: CGFloat = 1.0
         private var needsInitialFit = false
+        // Unrotated source image; rotation renders a rotated copy so scroll/zoom
+        // logic keeps working against the displayed (possibly swapped) dimensions.
+        private var baseImage: NSImage?
+        private var appliedRotationDegrees = 0
 
         init(_ parent: ZoomableAsyncImageView) {
             self.parent = parent
@@ -571,6 +595,71 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         func setAllowsFullImageLoad(_ isAllowed: Bool) {
             guard allowsFullImageLoad != isAllowed else { return }
             allowsFullImageLoad = isAllowed
+        }
+
+        func setRotation(_ degrees: Int) {
+            let normalized = Self.normalizedDegrees(degrees)
+            guard normalized != appliedRotationDegrees else { return }
+            appliedRotationDegrees = normalized
+            guard let baseImage, let imageView else { return }
+
+            let displayImage = Self.rotatedImage(baseImage, degrees: normalized)
+            originalImageSize = displayImage.size
+            imageView.image = displayImage
+            imageView.frame = NSRect(origin: .zero, size: displayImage.size)
+#if DEBUG
+            debugLog("setRotation -> \(normalized)° displaySize=\(displayImage.size)")
+#endif
+            // Rotation swaps the aspect ratio, so refit the whole image into the viewport.
+            userHasAdjustedZoom = false
+            applyInitialFitIfNeeded(force: true, clearPersisted: true, center: true)
+        }
+
+        private static func normalizedDegrees(_ degrees: Int) -> Int {
+            ((degrees % 360) + 360) % 360
+        }
+
+        private static func rotatedImage(_ image: NSImage, degrees: Int) -> NSImage {
+            let normalized = normalizedDegrees(degrees)
+            guard normalized != 0,
+                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+                  let rotated = rotatedCGImage(cgImage, degrees: normalized) else {
+                return image
+            }
+            return NSImage(cgImage: rotated, size: NSSize(width: rotated.width, height: rotated.height))
+        }
+
+        private static func rotatedCGImage(_ cgImage: CGImage, degrees: Int) -> CGImage? {
+            let quarterTurn = degrees % 180 != 0
+            let width = quarterTurn ? cgImage.height : cgImage.width
+            let height = quarterTurn ? cgImage.width : cgImage.height
+            let colorSpace: CGColorSpace
+            if let sourceSpace = cgImage.colorSpace, sourceSpace.model == .rgb {
+                colorSpace = sourceSpace
+            } else {
+                colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            }
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+
+            context.interpolationQuality = .high
+            context.translateBy(x: CGFloat(width) / 2, y: CGFloat(height) / 2)
+            // Stored degrees are clockwise; CGContext rotation is counterclockwise-positive.
+            context.rotate(by: -CGFloat(degrees) * .pi / 180)
+            context.draw(cgImage, in: CGRect(
+                x: -CGFloat(cgImage.width) / 2,
+                y: -CGFloat(cgImage.height) / 2,
+                width: CGFloat(cgImage.width),
+                height: CGFloat(cgImage.height)
+            ))
+            return context.makeImage()
         }
 
         func observeBoundsChanges() {
@@ -595,6 +684,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             currentScale = actualPixelScale
             lastAppliedFitScale = nil
             needsInitialFit = true
+            baseImage = nil
 
 #if DEBUG
             debugLog("loadImage generation=\(generation) url=\(requestURL.path)")
@@ -610,9 +700,12 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                 return
             }
             allowsCurrentImageUpscaling = allowsUpscaling
-            originalImageSize = image.size
-            imageView.image = image
-            imageView.frame = NSRect(origin: .zero, size: image.size)
+            baseImage = image
+            appliedRotationDegrees = Self.normalizedDegrees(parent.rotationDegrees)
+            let displayImage = Self.rotatedImage(image, degrees: appliedRotationDegrees)
+            originalImageSize = displayImage.size
+            imageView.image = displayImage
+            imageView.frame = NSRect(origin: .zero, size: displayImage.size)
             didApplyInitialFit = false
             userHasAdjustedZoom = false
             if let scrollView {

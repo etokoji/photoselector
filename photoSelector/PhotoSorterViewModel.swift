@@ -214,6 +214,21 @@ struct FolderPaneState: Identifiable, Equatable {
     var groupAColumns: Int = 2
     var groupBColumns: Int = 2
 
+    // Per-image display rotation in clockwise degrees (0/90/180/270).
+    // Shared by the preview pane and the enlarged preview window; not written to the file.
+    var previewRotations: [URL: Int] = [:]
+
+    func previewRotation(for url: URL) -> Int {
+        previewRotations[url.standardizedFileURL] ?? 0
+    }
+
+    func rotatePreview(for url: URL, clockwise: Bool) {
+        let key = url.standardizedFileURL
+        let current = previewRotations[key] ?? 0
+        let next = (((current + (clockwise ? 90 : -90)) % 360) + 360) % 360
+        previewRotations[key] = next == 0 ? nil : next
+    }
+
     private func rebuildPhotoIndexes() {
         photoByID = Dictionary(photos.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         photoIndexByID = Dictionary(uniqueKeysWithValues: photos.enumerated().map { ($0.element.id, $0.offset) })
@@ -523,7 +538,7 @@ struct FolderPaneState: Identifiable, Equatable {
             folderPanes[index].expandedFolderURLs = urls
         }
     }
-
+    
     func folderTree(for panel: FolderPanelKind) -> [FileSystemItem] {
         switch panel {
         case .primary:
@@ -535,6 +550,7 @@ struct FolderPaneState: Identifiable, Equatable {
         }
     }
 
+    // Flatten the tree in display order, descending only into expanded folders
     private func visibleFolderURLs(in panel: FolderPanelKind) -> [URL] {
         var result: [URL] = []
         func walk(_ items: [FileSystemItem]) {
@@ -576,7 +592,7 @@ struct FolderPaneState: Identifiable, Equatable {
         guard visible.indices.contains(newIndex) else { return }
         setSelectedFolderURL(visible[newIndex], for: panel)
     }
-    
+
     func shouldShowEjectVolumeButton(for panel: FolderPanelKind, item: FileSystemItem) -> Bool {
         guard let root = rootFolderURL(for: panel) else { return false }
         guard root == item.id.standardizedFileURL else { return false }
