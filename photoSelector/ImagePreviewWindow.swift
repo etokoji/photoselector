@@ -770,6 +770,30 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                 return nil
             }
 
+            // Decode through the thumbnail API at full resolution with transform
+            // enabled so the EXIF orientation is baked into the pixels;
+            // CGImageSourceCreateImageAtIndex returns the raw (unrotated) pixels.
+            var maxPixelSize = 0
+            if let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] {
+                let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+                let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+                maxPixelSize = max(width, height)
+            }
+            if maxPixelSize > 0 {
+                let thumbnailOptions = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+                ] as CFDictionary
+                if let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, thumbnailOptions) {
+                    return (
+                        cgImage: cgImage,
+                        size: NSSize(width: cgImage.width, height: cgImage.height)
+                    )
+                }
+            }
+
             let imageOptions = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
             guard let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, imageOptions) else {
                 return nil
