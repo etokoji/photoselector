@@ -288,6 +288,7 @@ struct ContentView: View {
         .background(WindowCloseObserver {
             closePreviewWindowForMainWindowClose()
         })
+        .background(WindowCloseGuard(pendingSortSummary: pendingSortSummary))
         .focusedValue(\.saveWindowLayoutDefaults) {
             WindowLayoutDefaults.saveCurrentLayout(
                 windowID: windowID,
@@ -304,6 +305,21 @@ struct ContentView: View {
     }
     
 #if os(macOS)
+    /// 仕分けペイン（採用／没）に残っている画像の枚数。空なら nil。
+    private func pendingSortSummary() -> PendingSortSummary? {
+        var keepCount = 0
+        var discardCount = 0
+        for photo in viewModel.photos {
+            switch photo.status {
+            case .groupA: keepCount += 1
+            case .groupB: discardCount += 1
+            case .unknown: break
+            }
+        }
+        guard keepCount + discardCount > 0 else { return nil }
+        return PendingSortSummary(keepCount: keepCount, discardCount: discardCount)
+    }
+
     private func applySavedLayoutDefaultsIfNeeded() {
         guard !didApplyLayoutDefaults else { return }
         didApplyLayoutDefaults = true
@@ -3185,6 +3201,132 @@ private final class WindowCloseObserverView: NSView {
             NotificationCenter.default.removeObserver(observer)
             self.observer = nil
         }
+    }
+}
+
+// MARK: - Close Confirmation
+
+struct PendingSortSummary {
+    let keepCount: Int
+    let discardCount: Int
+}
+
+/// 仕分けペインに画像が残っている状態でウインドウを閉じようとしたとき、確認ダイアログを表示する。
+private struct WindowCloseGuard: NSViewRepresentable {
+    let pendingSortSummary: () -> PendingSortSummary?
+
+    func makeNSView(context: Context) -> WindowCloseGuardView {
+        let view = WindowCloseGuardView()
+        view.pendingSortSummary = pendingSortSummary
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowCloseGuardView, context: Context) {
+        nsView.pendingSortSummary = pendingSortSummary
+        nsView.installGuardIfNeeded()
+    }
+}
+
+private final class WindowCloseGuardView: NSView {
+    var pendingSortSummary: (() -> PendingSortSummary?)?
+    private var proxyDelegate: WindowCloseGuardDelegate?
+    private weak var guardedWindow: NSWindow?
+    private var closeObserver: NSObjectProtocol?
+
+    deinit {
+        removeCloseObserver()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installGuardIfNeeded()
+    }
+
+    func installGuardIfNeeded() {
+        guard let window else { return }
+
+        // すでに自分のプロキシが刺さっているなら何もしない
+        if guardedWindow === window, let proxyDelegate, window.delegate === proxyDelegate {
+            return
+        }
+
+        let proxy = WindowCloseGuardDelegate()
+        proxy.wrappedDelegate = window.delegate
+        proxy.pendingSortSummary = { [weak self] in self?.pendingSortSummary?() }
+        window.delegate = proxy
+
+        proxyDelegate = proxy
+        guardedWindow = window
+        observeClose(of: window)
+    }
+
+    private func observeClose(of window: NSWindow) {
+        removeCloseObserver()
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            // ウインドウ経由の強参照サイクルを断つ
+            DispatchQueue.main.async {
+                self?.releaseGuard()
+            }
+        }
+    }
+
+    private func releaseGuard() {
+        removeCloseObserver()
+        proxyDelegate?.wrappedDelegate = nil
+        proxyDelegate = nil
+        guardedWindow = nil
+    }
+
+    private func removeCloseObserver() {
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+            self.closeObserver = nil
+        }
+    }
+}
+
+/// SwiftUI が設定した既存のデリゲートを包み、`windowShouldClose` だけを差し込むプロキシ。
+private final class WindowCloseGuardDelegate: NSObject, NSWindowDelegate {
+    // NSWindow.delegate は weak なので、元のデリゲートはこちらで保持する
+    var wrappedDelegate: NSWindowDelegate?
+    var pendingSortSummary: (() -> PendingSortSummary?)?
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return wrappedDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let wrappedDelegate, wrappedDelegate.responds(to: aSelector) {
+            return wrappedDelegate
+        }
+        return super.forwardingTarget(for: aSelector)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let summary = pendingSortSummary?(), !confirmClose(with: summary, for: sender) {
+            return false
+        }
+
+        if let wrappedDelegate, wrappedDelegate.responds(to: #selector(NSWindowDelegate.windowShouldClose(_:))) {
+            return wrappedDelegate.windowShouldClose?(sender) ?? true
+        }
+        return true
+    }
+
+    private func confirmClose(with summary: PendingSortSummary, for window: NSWindow) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "仕分け中の画像があります。ウインドウを閉じますか？"
+        alert.informativeText = "採用 \(summary.keepCount)枚、没 \(summary.discardCount)枚が仕分けペインに残っています。閉じると仕分けの結果は失われます。"
+        alert.addButton(withTitle: "閉じる")
+        alert.addButton(withTitle: "キャンセル")
+        alert.buttons[1].keyEquivalent = "\u{1b}"
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 
