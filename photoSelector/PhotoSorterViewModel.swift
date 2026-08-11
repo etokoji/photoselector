@@ -18,33 +18,155 @@ nonisolated private struct ThumbnailRequestKey: Hashable, Sendable {
     let pixelSize: Int
 }
 
+// Bounded LRU for decoded thumbnails, capped by both bitmap bytes and entry count.
+// This replaces NSCache because we need two things NSCache cannot give us: a budget
+// in real bitmap bytes, since thumbnails vary enough in size that an entry count
+// alone bounds nothing; and enumerable keys, so thumbnails belonging to photos that
+// left every pane can be dropped. ThumbnailGenerator keeps one instance per size
+// class. Not thread-safe on its own; ThumbnailGenerator serialises every call on
+// stateQueue.
+nonisolated private final class ThumbnailLRUCache {
+    private struct Entry {
+        let image: NSImage
+        let cost: Int
+    }
+
+    private let costLimit: Int
+    private let countLimit: Int
+    private var entries: [ThumbnailRequestKey: Entry] = [:]
+    // Oldest first; the tail is the most recently used key.
+    private var accessOrder: [ThumbnailRequestKey] = []
+    // Lets the preview reuse whatever size was decoded last for a URL without
+    // scanning the cache. Dropped rather than repaired when that entry is evicted:
+    // it only feeds a placeholder, so a miss just means a normal decode.
+    private var latestKeyByURL: [URL: ThumbnailRequestKey] = [:]
+    private var totalCost = 0
+
+    init(costLimit: Int, countLimit: Int) {
+        self.costLimit = costLimit
+        self.countLimit = countLimit
+    }
+
+    func image(for key: ThumbnailRequestKey) -> NSImage? {
+        guard let entry = entries[key] else { return nil }
+        touch(key)
+        latestKeyByURL[key.url] = key
+        return entry.image
+    }
+
+    func latestImage(for url: URL) -> NSImage? {
+        guard let key = latestKeyByURL[url], let entry = entries[key] else { return nil }
+        touch(key)
+        return entry.image
+    }
+
+    func insert(_ image: NSImage, cost: Int, for key: ThumbnailRequestKey) {
+        let cost = max(cost, 1)
+        if let existing = entries.removeValue(forKey: key) {
+            totalCost -= existing.cost
+            if let index = accessOrder.lastIndex(of: key) {
+                accessOrder.remove(at: index)
+            }
+        }
+        entries[key] = Entry(image: image, cost: cost)
+        accessOrder.append(key)
+        latestKeyByURL[key.url] = key
+        totalCost += cost
+        evictIfNeeded()
+    }
+
+    // Keeps only thumbnails whose photo is still reachable from some pane.
+    func retainOnly(urls: Set<URL>) {
+        guard !entries.isEmpty else { return }
+        var survivors: [ThumbnailRequestKey: Entry] = [:]
+        survivors.reserveCapacity(entries.count)
+        var survivingCost = 0
+        for (key, entry) in entries where urls.contains(key.url) {
+            survivors[key] = entry
+            survivingCost += entry.cost
+        }
+        guard survivors.count != entries.count else { return }
+        entries = survivors
+        accessOrder = accessOrder.filter { survivors[$0] != nil }
+        latestKeyByURL = latestKeyByURL.filter { survivors[$0.value] != nil }
+        totalCost = survivingCost
+    }
+
+    private func touch(_ key: ThumbnailRequestKey) {
+        guard let index = accessOrder.lastIndex(of: key), index != accessOrder.count - 1 else { return }
+        accessOrder.remove(at: index)
+        accessOrder.append(key)
+    }
+
+    // Always leaves the just-inserted entry in place, even when a single
+    // full-pane thumbnail is larger than the whole budget on its own.
+    private func evictIfNeeded() {
+        while entries.count > 1, !accessOrder.isEmpty, totalCost > costLimit || entries.count > countLimit {
+            let oldest = accessOrder.removeFirst()
+            guard let entry = entries.removeValue(forKey: oldest) else { continue }
+            totalCost -= entry.cost
+            if latestKeyByURL[oldest.url] == oldest {
+                latestKeyByURL[oldest.url] = nil
+            }
+        }
+    }
+}
+
 class ThumbnailGenerator {
     static let shared = ThumbnailGenerator()
 
-    // Thumbnail loading is shared by the grid and preview window. The cache keeps
-    // generated thumbnails in memory, while latestThumbnailByURL lets the preview
-    // show an already visible grid thumbnail immediately before any SD card read.
-    private let cache = NSCache<NSString, NSImage>()
+    // Thumbnail loading is shared by the grid and preview window, but the two ask for
+    // wildly different sizes: a grid thumbnail is a fraction of a megabyte, a
+    // preview-pane one is over ten. In a single LRU the heavy entries evicted the
+    // light ones, so a folder's grid was re-read from the card constantly while most
+    // of the budget sat in preview thumbnails that were never looked at again.
+    // Splitting by size class gives each the capacity it can actually use.
+    private let smallCache: ThumbnailLRUCache
+    private let largeCache: ThumbnailLRUCache
     private let generationQueue: OperationQueue
     private let stateQueue = DispatchQueue(label: "dev.etokoji.thumbnailgenerator.state")
     private var completionsByKey: [ThumbnailRequestKey: [(NSImage?) -> Void]] = [:]
-    private var latestThumbnailByURL: [URL: NSImage] = [:]
+
+    // Classification follows the requested size, not the view that asked: a preview
+    // pane shrunk below this is genuinely cheap and belongs with the grid thumbnails.
+    // At normal window sizes the grid tops out at 800px and the side panes sit at
+    // 320px, while the preview pane asks for 1280px or more.
+    private static let largeClassThreshold = 512
 
     private init() {
         generationQueue = OperationQueue()
         generationQueue.name = "dev.etokoji.thumbnailgenerator"
         generationQueue.qualityOfService = .userInitiated
         generationQueue.maxConcurrentOperationCount = max(2, min(4, ProcessInfo.processInfo.activeProcessorCount / 2))
-        cache.countLimit = 800
+        smallCache = ThumbnailLRUCache(costLimit: Self.smallClassCostLimit(), countLimit: 8000)
+        largeCache = ThumbnailLRUCache(costLimit: Self.largeClassCostLimit, countLimit: Self.largeClassCountLimit)
+    }
+
+    // Small class: grid and side-pane thumbnails. This is where capacity pays off —
+    // a whole folder's grid fits, so scrolling back never re-reads the card. A
+    // thirty-second of RAM, clamped so an 8 GB machine stays modest while a 64 GB one
+    // can hold a few thousand thumbnails.
+    private static func smallClassCostLimit() -> Int {
+        let proposed = ProcessInfo.processInfo.physicalMemory / 32
+        let minimum: UInt64 = 128 * 1024 * 1024
+        let maximum: UInt64 = 1024 * 1024 * 1024
+        return Int(min(max(proposed, minimum), maximum))
+    }
+
+    // Large class: preview-pane thumbnails. Only the last few are ever reused, when
+    // stepping back a photo or two, so capacity here is close to pure waste. The byte
+    // ceiling is a backstop against unusually large entries; the count is the limit
+    // that actually operates.
+    private static let largeClassCountLimit = 6
+    private static let largeClassCostLimit = 128 * 1024 * 1024
+
+    private func cache(for key: ThumbnailRequestKey) -> ThumbnailLRUCache {
+        key.pixelSize > Self.largeClassThreshold ? largeCache : smallCache
     }
 
     func thumbnail(for url: URL, size: CGFloat, completion: @escaping (NSImage?) -> Void) {
         let key = ThumbnailRequestKey(url: url.standardizedFileURL, pixelSize: pixelSize(for: size))
-        let cacheKey = cacheKey(for: key)
-        if let cachedImage = cache.object(forKey: cacheKey) {
-            stateQueue.sync {
-                latestThumbnailByURL[key.url] = cachedImage
-            }
+        if let cachedImage = stateQueue.sync(execute: { cache(for: key).image(for: key) }) {
             completion(cachedImage)
             return
         }
@@ -65,14 +187,11 @@ class ThumbnailGenerator {
 
         generationQueue.addOperation { [weak self] in
             guard let self else { return }
-            let image = self.generateThumbnail(for: key.url, pixelSize: key.pixelSize)
-            if let image {
-                self.cache.setObject(image, forKey: cacheKey)
-            }
+            let generated = self.generateThumbnail(for: key.url, pixelSize: key.pixelSize)
 
             let completions = self.stateQueue.sync { () -> [(NSImage?) -> Void] in
-                if let image {
-                    self.latestThumbnailByURL[key.url] = image
+                if let generated {
+                    self.cache(for: key).insert(generated.image, cost: generated.cost, for: key)
                 }
                 let completions = self.completionsByKey[key] ?? []
                 self.completionsByKey[key] = nil
@@ -80,7 +199,7 @@ class ThumbnailGenerator {
             }
 
             DispatchQueue.main.async {
-                completions.forEach { $0(image) }
+                completions.forEach { $0(generated?.image) }
             }
         }
     }
@@ -93,22 +212,34 @@ class ThumbnailGenerator {
         }
     }
 
+    // Small class first: it is the likelier hit and the cheaper image, and every
+    // caller wants this only as an instant placeholder until the correctly sized
+    // thumbnail arrives. For the preview pane that means a brief soft image rather
+    // than an empty frame, which is the intended behaviour.
     func cachedThumbnail(for url: URL) -> NSImage? {
         let key = url.standardizedFileURL
         return stateQueue.sync {
-            latestThumbnailByURL[key]
+            smallCache.latestImage(for: key) ?? largeCache.latestImage(for: key)
+        }
+    }
+
+    // Drops thumbnails for photos that are no longer reachable from any pane, so
+    // switching folders returns the memory the previous folder's grid was holding.
+    func retainThumbnails(for urls: Set<URL>) {
+        let normalized = Set(urls.map { $0.standardizedFileURL })
+        stateQueue.async {
+            self.smallCache.retainOnly(urls: normalized)
+            self.largeCache.retainOnly(urls: normalized)
         }
     }
 
     private func pixelSize(for size: CGFloat) -> Int {
-        max(1, Int(ceil(size * 2)))
+        // Hard ceiling: the enlarged preview window decodes at full resolution, so
+        // nothing in the grid or the preview pane ever needs more pixels than this.
+        min(2048, max(1, Int(ceil(size * 2))))
     }
 
-    private func cacheKey(for key: ThumbnailRequestKey) -> NSString {
-        "\(key.url.path)#\(key.pixelSize)" as NSString
-    }
-
-    private func generateThumbnail(for url: URL, pixelSize: Int) -> NSImage? {
+    private func generateThumbnail(for url: URL, pixelSize: Int) -> (image: NSImage, cost: Int)? {
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             return nil
         }
@@ -124,10 +255,11 @@ class ThumbnailGenerator {
             return nil
         }
 
-        return NSImage(
+        let image = NSImage(
             cgImage: cgImage,
             size: NSSize(width: cgImage.width, height: cgImage.height)
         )
+        return (image, cgImage.bytesPerRow * cgImage.height)
     }
 }
 
@@ -237,16 +369,34 @@ struct FolderPaneState: Identifiable, Equatable {
         keepIndexByID = Dictionary(uniqueKeysWithValues: keepPhotoIDs.enumerated().map { ($0.element, $0.offset) })
         discardedIndexByID = Dictionary(uniqueKeysWithValues: discardedPhotoIDs.enumerated().map { ($0.element, $0.offset) })
 
-        guard let currentFolder else {
+        if let currentFolder {
+            let normalizedPath = currentFolder.standardizedFileURL.path.lowercased()
+            currentFolderPhotoIDs = photos.compactMap { photo in
+                photo.url.deletingLastPathComponent().path.lowercased() == normalizedPath ? photo.id : nil
+            }
+            currentFolderIndexByID = Dictionary(uniqueKeysWithValues: currentFolderPhotoIDs.enumerated().map { ($0.element, $0.offset) })
+        } else {
             currentFolderPhotoIDs = []
             currentFolderIndexByID = [:]
-            return
         }
-        let normalizedPath = currentFolder.standardizedFileURL.path.lowercased()
-        currentFolderPhotoIDs = photos.compactMap { photo in
-            photo.url.deletingLastPathComponent().path.lowercased() == normalizedPath ? photo.id : nil
+
+        pruneThumbnailCache()
+    }
+
+    // photos keeps entries from every folder visited this session so the keep and
+    // discard panes stay populated across folder switches. Only the three pane
+    // lists are actually displayable, so anything outside them — a previous
+    // folder's unsorted grid, above all — is holding thumbnails for nothing.
+    private func pruneThumbnailCache() {
+        var retained = Set<URL>()
+        retained.reserveCapacity(currentFolderPhotoIDs.count + keepPhotoIDs.count + discardedPhotoIDs.count)
+        for ids in [currentFolderPhotoIDs, keepPhotoIDs, discardedPhotoIDs] {
+            for id in ids {
+                guard let photo = photoByID[id] else { continue }
+                retained.insert(photo.url.standardizedFileURL)
+            }
         }
-        currentFolderIndexByID = Dictionary(uniqueKeysWithValues: currentFolderPhotoIDs.enumerated().map { ($0.element, $0.offset) })
+        ThumbnailGenerator.shared.retainThumbnails(for: retained)
     }
     
     func applyWindowLayoutSettings(_ settings: WindowLayoutSettings) {

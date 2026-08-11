@@ -521,14 +521,14 @@ private struct MemoryUsageView: View {
 }
 
 private struct AppMemoryUsage {
-    let residentBytes: UInt64?
+    let footprintBytes: UInt64?
 
     var formatted: String {
-        guard let residentBytes else {
+        guard let footprintBytes else {
             return "RAM --"
         }
 
-        let megabytes = Double(residentBytes) / 1_048_576
+        let megabytes = Double(footprintBytes) / 1_048_576
         if megabytes >= 1_024 {
             return String(format: "RAM %.1f GB", megabytes / 1_024)
         } else {
@@ -536,15 +536,19 @@ private struct AppMemoryUsage {
         }
     }
 
+    // phys_footprint rather than resident_size: resident_size omits pages the memory
+    // compressor has taken, and idle image bitmaps are exactly what gets compressed.
+    // That made the readout drop while the app kept growing. phys_footprint is what
+    // Activity Monitor shows and what the system uses to decide it is out of memory.
     static var current: AppMemoryUsage {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
 
         let result = withUnsafeMutablePointer(to: &info) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
                 task_info(
                     mach_task_self_,
-                    task_flavor_t(MACH_TASK_BASIC_INFO),
+                    task_flavor_t(TASK_VM_INFO),
                     reboundPointer,
                     &count
                 )
@@ -552,10 +556,10 @@ private struct AppMemoryUsage {
         }
 
         guard result == KERN_SUCCESS else {
-            return AppMemoryUsage(residentBytes: nil)
+            return AppMemoryUsage(footprintBytes: nil)
         }
 
-        return AppMemoryUsage(residentBytes: UInt64(info.resident_size))
+        return AppMemoryUsage(footprintBytes: UInt64(max(0, info.phys_footprint)))
     }
 }
 
@@ -2536,11 +2540,19 @@ private struct PreviewImageView: View {
         rotationDegrees % 180 != 0
     }
 
+    // Coarse quantisation keeps a window resize from minting a fresh multi-megabyte
+    // thumbnail at every intermediate width, and the ceiling keeps one pane-sized
+    // entry from dominating the cache budget. Beyond this the enlarged preview
+    // window is the right tool: it decodes at full resolution on demand.
+    private static let previewSizeQuantum: CGFloat = 128
+    private static let previewMaxPoints: CGFloat = 1024
+
     private var thumbnailSize: CGFloat {
         guard allowsThumbnailGeneration else { return 160 }
         let maxDimension = max(displaySize.width, displaySize.height)
         guard maxDimension.isFinite, maxDimension > 0 else { return 640 }
-        return max(160, ceil(maxDimension / 64) * 64)
+        let quantised = ceil(maxDimension / Self.previewSizeQuantum) * Self.previewSizeQuantum
+        return min(Self.previewMaxPoints, max(160, quantised))
     }
 
     var body: some View {
