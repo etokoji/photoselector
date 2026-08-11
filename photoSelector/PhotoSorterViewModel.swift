@@ -212,14 +212,14 @@ class ThumbnailGenerator {
         }
     }
 
-    // Small class first: it is the likelier hit and the cheaper image, and every
-    // caller wants this only as an instant placeholder until the correctly sized
-    // thumbnail arrives. For the preview pane that means a brief soft image rather
-    // than an empty frame, which is the intended behaviour.
+    // Large class first: the only caller is the preview pane, where a cached
+    // pane-sized thumbnail is indistinguishable from the final image, while the
+    // small-class fallback is a visibly soft placeholder until the correctly
+    // sized thumbnail arrives — still better than an empty frame.
     func cachedThumbnail(for url: URL) -> NSImage? {
         let key = url.standardizedFileURL
         return stateQueue.sync {
-            smallCache.latestImage(for: key) ?? largeCache.latestImage(for: key)
+            largeCache.latestImage(for: key) ?? smallCache.latestImage(for: key)
         }
     }
 

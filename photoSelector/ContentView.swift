@@ -2531,6 +2531,10 @@ private struct PreviewImageView: View {
     let allowsThumbnailGeneration: Bool
     var rotationDegrees: Int = 0
     @State private var image: NSImage?
+    // URL the displayed image belongs to, so a task re-run for the same URL
+    // (navigation mode toggling allowsThumbnailGeneration) never replaces an
+    // already-sharp image with a lower-resolution cached placeholder.
+    @State private var imageURL: URL?
     @State private var isLoading = false
     @State private var didFail = false
 
@@ -2595,8 +2599,9 @@ private struct PreviewImageView: View {
         didFail = false
         isLoading = true
 
-        if let cachedThumbnail = ThumbnailGenerator.shared.cachedThumbnail(for: url) {
+        if imageURL != url, let cachedThumbnail = ThumbnailGenerator.shared.cachedThumbnail(for: url) {
             image = cachedThumbnail
+            imageURL = url
             didFail = false
             isLoading = allowsThumbnailGeneration
         }
@@ -2610,7 +2615,10 @@ private struct PreviewImageView: View {
         let loadedImage = await ThumbnailGenerator.shared.thumbnail(for: url, size: thumbnailSize)
 
         guard !Task.isCancelled else { return }
-        image = loadedImage ?? image
+        if let loadedImage {
+            image = loadedImage
+            imageURL = url
+        }
         didFail = loadedImage == nil
         isLoading = false
     }
