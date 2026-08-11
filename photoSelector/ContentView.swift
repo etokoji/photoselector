@@ -1928,6 +1928,31 @@ private struct RAWBadge: View {
     }
 }
 
+// Shown in place of a thumbnail when decoding failed (corrupt file, unreadable
+// media), so the cell does not spin forever. The large style is for the
+// preview pane, where the grid-sized glyph would be lost.
+private struct ThumbnailErrorPlaceholder: View {
+    var showsLabel = true
+    var isLarge = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.gray.opacity(0.2))
+            .overlay(
+                VStack(spacing: isLarge ? 8 : 4) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(isLarge ? .largeTitle : .body)
+                        .foregroundStyle(.secondary)
+                    if showsLabel {
+                        Text("読み込み失敗")
+                            .font(isLarge ? .body : .caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            )
+    }
+}
+
 struct PhotoGridItem: View {
     let photo: PhotoItem
     let thumbnailSize: Double
@@ -1940,8 +1965,9 @@ struct PhotoGridItem: View {
     var selectedCount: Int = 0
     var dragURLsProvider: (() -> [URL])? = nil
     @State private var thumbnail: NSImage?
+    @State private var didFailToLoad = false
     @State private var showDeleteConfirmation = false
-    
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             Group {
@@ -1949,6 +1975,8 @@ struct PhotoGridItem: View {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                } else if didFailToLoad {
+                    ThumbnailErrorPlaceholder()
                 } else {
                     Rectangle()
                         .fill(Color.gray.opacity(0.2))
@@ -2058,6 +2086,7 @@ struct PhotoGridItem: View {
         let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
         guard !Task.isCancelled else { return }
         if let image { thumbnail = image }
+        didFailToLoad = image == nil && thumbnail == nil
     }
 
     var borderColor: Color {
@@ -2591,14 +2620,7 @@ private struct PreviewImageView: View {
                     .rotationEffect(.degrees(Double(rotationDegrees)))
                     .frame(width: displaySize.width, height: displaySize.height)
             } else if didFail {
-                VStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                        .foregroundStyle(.secondary)
-                    Text("Failed to load")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ThumbnailErrorPlaceholder(isLarge: true)
             } else {
                 Rectangle()
                     .fill(Color.gray.opacity(0.2))
@@ -2637,8 +2659,14 @@ private struct PreviewImageView: View {
         if let loadedImage {
             image = loadedImage
             imageURL = url
+        } else if imageURL != url {
+            // Decode failed for a newly selected photo: drop the stale image
+            // left over from the previous one so the error placeholder shows.
+            // A failed re-decode of the photo already on screen keeps its image.
+            image = nil
+            imageURL = nil
         }
-        didFail = loadedImage == nil
+        didFail = image == nil
         isLoading = false
     }
 
@@ -2797,6 +2825,7 @@ struct GroupAThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @State private var didFailToLoad = false
     @Environment(PhotoSorterViewModel.self) private var viewModel
     
     var body: some View {
@@ -2806,6 +2835,8 @@ struct GroupAThumbnail: View {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                } else if didFailToLoad {
+                    ThumbnailErrorPlaceholder(showsLabel: false)
                 } else {
                     Rectangle()
                         .fill(Color.gray.opacity(0.2))
@@ -2879,6 +2910,7 @@ struct GroupAThumbnail: View {
         let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
         guard !Task.isCancelled else { return }
         if let image { thumbnail = image }
+        didFailToLoad = image == nil && thumbnail == nil
     }
 }
 
@@ -3029,6 +3061,7 @@ struct GroupBThumbnail: View {
     var onEnsureSelectedForContextMenu: (() -> Void)? = nil
     var onSetStatusForSelection: ((PhotoStatus) -> Void)? = nil
     @State private var thumbnail: NSImage?
+    @State private var didFailToLoad = false
     @Environment(PhotoSorterViewModel.self) private var viewModel
     
     var body: some View {
@@ -3038,6 +3071,8 @@ struct GroupBThumbnail: View {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
+                } else if didFailToLoad {
+                    ThumbnailErrorPlaceholder(showsLabel: false)
                 } else {
                     Rectangle()
                         .fill(Color.gray.opacity(0.2))
@@ -3114,6 +3149,7 @@ struct GroupBThumbnail: View {
         let image = await ThumbnailGenerator.shared.thumbnail(for: photo.url, size: size)
         guard !Task.isCancelled else { return }
         if let image { thumbnail = image }
+        didFailToLoad = image == nil && thumbnail == nil
     }
 }
 

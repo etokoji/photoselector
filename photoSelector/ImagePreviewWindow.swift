@@ -521,8 +521,27 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
             coordinator?.magnify(by: magnificationDelta)
         }
 
+        // Error placeholder shown instead of the image when decoding fails
+        // (corrupt file), mirroring the grid's 読み込み失敗 display.
+        let errorIcon = NSImageView()
+        errorIcon.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "読み込み失敗")
+        errorIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 36, weight: .regular)
+        errorIcon.contentTintColor = .secondaryLabelColor
+        let errorLabel = NSTextField(labelWithString: "読み込み失敗")
+        errorLabel.textColor = .secondaryLabelColor
+        let errorStack = NSStackView(views: [errorIcon, errorLabel])
+        errorStack.orientation = .vertical
+        errorStack.spacing = 8
+        errorStack.isHidden = true
+        // NSScrollView lays its subviews out with tile(), which never runs the
+        // constraint engine for foreign subviews, so the placeholder is framed
+        // manually (showLoadFailurePlaceholder) and kept centered by its mask.
+        errorStack.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        scrollView.addSubview(errorStack)
+
         context.coordinator.imageView = imageView
         context.coordinator.scrollView = scrollView
+        context.coordinator.errorPlaceholderView = errorStack
         context.coordinator.setAllowsFullImageLoad(allowFullImageLoad)
         context.coordinator.syncWithController()
         context.coordinator.observeBoundsChanges()
@@ -554,6 +573,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
         var parent: ZoomableAsyncImageView
         weak var imageView: NSImageView?
         weak var scrollView: NSScrollView?
+        weak var errorPlaceholderView: NSView?
         var currentURL: URL?
         private var didApplyInitialFit = false
         private var lastAppliedFitScale: CGFloat?
@@ -700,6 +720,7 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                 return
             }
             allowsCurrentImageUpscaling = allowsUpscaling
+            errorPlaceholderView?.isHidden = true
             baseImage = image
             appliedRotationDegrees = Self.normalizedDegrees(parent.rotationDegrees)
             let displayImage = Self.rotatedImage(image, degrees: appliedRotationDegrees)
@@ -741,6 +762,11 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 #if DEBUG
                 debugLog("full load failed: ImageIO returned nil generation=\(generation)")
 #endif
+                // Clear the previous photo's image so navigating onto an
+                // undecodable file does not leave the old picture on screen.
+                if currentURL == url, loadGeneration == generation {
+                    showLoadFailurePlaceholder()
+                }
                 return
             }
 #if DEBUG
@@ -762,6 +788,24 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
 
             let fullImage = NSImage(cgImage: decoded.cgImage, size: decoded.size)
             displayLoadedImage(fullImage, allowsUpscaling: false)
+        }
+
+        private func showLoadFailurePlaceholder() {
+            baseImage = nil
+            originalImageSize = .zero
+            if let imageView {
+                imageView.image = nil
+                imageView.frame = .zero
+            }
+            guard let errorPlaceholderView, let scrollView else { return }
+            let size = errorPlaceholderView.fittingSize
+            errorPlaceholderView.frame = NSRect(
+                x: (scrollView.bounds.width - size.width) / 2,
+                y: (scrollView.bounds.height - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+            errorPlaceholderView.isHidden = false
         }
 
         private static func decodedFullImage(from url: URL) -> (cgImage: CGImage, size: NSSize)? {
@@ -948,8 +992,23 @@ struct ZoomableAsyncImageView: NSViewRepresentable {
                 } else {
                     self.performBoundsAwareFitIfNeeded(scrollView: scrollView)
                 }
+                self.recenterLoadFailurePlaceholderIfVisible()
                 self.reportCurrentZoom()
             }
+        }
+
+        // The placeholder is framed manually (no autolayout inside NSScrollView),
+        // so keep it centered when the window is resized while it is on screen.
+        private func recenterLoadFailurePlaceholderIfVisible() {
+            guard let errorPlaceholderView, !errorPlaceholderView.isHidden,
+                  let scrollView else { return }
+            let size = errorPlaceholderView.fittingSize
+            errorPlaceholderView.frame = NSRect(
+                x: (scrollView.bounds.width - size.width) / 2,
+                y: (scrollView.bounds.height - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
         }
 
         private func performBoundsAwareFitIfNeeded(scrollView: NSScrollView) {
