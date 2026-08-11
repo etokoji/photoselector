@@ -144,9 +144,15 @@ struct photoSelectorApp: App {
         }
         .commands { appCommands }
     }
-    
+
     @CommandsBuilder
     private var appCommands: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("photoSelectorについて") {
+                showAboutPanel()
+            }
+        }
+
         CommandGroup(after: .toolbar) {
             Button("ライトモード") {
                 setAppearanceMode(.light)
@@ -211,5 +217,23 @@ struct photoSelectorApp: App {
         }
 
         NSApp.appearance = mode.nsAppearance
+    }
+
+    // Standard About panel has no URL field of its own, so the project link
+    // is passed through the credits area as a clickable link.
+    private func showAboutPanel() {
+        let urlString = "https://github.com/etokoji/photoselector"
+        let credits = NSMutableAttributedString(
+            string: urlString,
+            attributes: [
+                .link: URL(string: urlString)!,
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            ]
+        )
+        credits.setAlignment(.center, range: NSRange(location: 0, length: credits.length))
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: credits
+        ])
     }
 }
