@@ -908,7 +908,8 @@ struct FolderPaneState: Identifiable, Equatable {
                                                                includingPropertiesForKeys: [.creationDateKey],
                                                                options: [])
 
-            let imageExtensions = ["jpg", "jpeg", "png", "heic", "gif", "tiff"]
+            let imageExtensions = Set(["jpg", "jpeg", "png", "heic", "gif", "tiff"])
+                .union(PhotoItem.rawExtensions)
 
             let imageFiles = fileURLs.filter { url in
                 !url.lastPathComponent.hasPrefix(".") &&

@@ -1915,6 +1915,19 @@ private struct ThumbnailLoadRequest: Hashable {
     let size: CGFloat
 }
 
+// Small "RAW" tag shown on thumbnails of camera RAW files, so they can be
+// told apart from JPEGs of the same scene at a glance.
+private struct RAWBadge: View {
+    var body: some View {
+        Text("RAW")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
+    }
+}
+
 struct PhotoGridItem: View {
     let photo: PhotoItem
     let thumbnailSize: Double
@@ -1956,7 +1969,13 @@ struct PhotoGridItem: View {
                     .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 4 : 2) : 0)
                     .padding(-2)
             )
-            
+            .overlay(alignment: .bottomLeading) {
+                if photo.isRAW {
+                    RAWBadge()
+                        .padding(6)
+                }
+            }
+
             // Status Indicator Icon
             if photo.status != .unknown {
                 Image(systemName: statusIcon)
@@ -2802,7 +2821,13 @@ struct GroupAThumbnail: View {
                     .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 3 : 2) : 0)
                     .padding(-1)
             )
-            
+            .overlay(alignment: .bottomLeading) {
+                if photo.isRAW {
+                    RAWBadge()
+                        .padding(3)
+                }
+            }
+
             // Status Icon Overlay
             Image(systemName: "checkmark.circle.fill")
                 .font(.caption)
@@ -3028,7 +3053,13 @@ struct GroupBThumbnail: View {
                     .stroke(Color.blue, lineWidth: isSelected ? (isPrimary ? 3 : 2) : 0)
                     .padding(-1)
             )
-            
+            .overlay(alignment: .bottomLeading) {
+                if photo.isRAW {
+                    RAWBadge()
+                        .padding(3)
+                }
+            }
+
             // Status Icon Overlay
             Image(systemName: "xmark.circle.fill")
                 .font(.caption)

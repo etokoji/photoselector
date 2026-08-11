@@ -22,7 +22,25 @@ struct PhotoItem: Identifiable, Hashable {
     let id: UUID = UUID()
     let url: URL
     var status: PhotoStatus = .unknown
-    
+
+    // Camera RAW formats decoded by the system ImageIO RAW support.
+    // loadPhotos builds its whitelist from this set, so adding a format here
+    // both lists the files and gives them the RAW badge.
+    static let rawExtensions: Set<String> = [
+        "cr2", "cr3",        // Canon
+        "nef", "nrw",        // Nikon
+        "arw",               // Sony
+        "raf",               // Fujifilm
+        "orf",               // OM System / Olympus
+        "rw2",               // Panasonic
+        "pef",               // Pentax
+        "dng"                // Adobe / Leica ほか
+    ]
+
+    var isRAW: Bool {
+        Self.rawExtensions.contains(url.pathExtension.lowercased())
+    }
+
     // Helper to get filename
     var filename: String {
         return url.lastPathComponent
