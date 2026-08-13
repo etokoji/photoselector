@@ -8,6 +8,7 @@ photoSelector is a macOS application for efficiently organizing and classifying 
 - [Screen Layout](#screen-layout)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [How to Classify Photos](#how-to-classify-photos)
+- [RAW File Support](#raw-file-support)
 - [Settings Persistence](#settings-persistence)
 
 ## Basic Usage
@@ -16,7 +17,7 @@ photoSelector is a macOS application for efficiently organizing and classifying 
 
 1. Click the "Open Folder" button in the upper left corner.
 2. Select the folder containing the photos you want to organize.
-3. Supported image formats: JPG, PNG, HEIC, GIF, TIFF.
+3. Supported image formats: JPG, PNG, HEIC, GIF, TIFF, and major camera RAW formats (see [RAW File Support](#raw-file-support)).
 
 ### 2. Classify Photos
 
@@ -37,7 +38,10 @@ Photos can be classified into three states:
 
 **Using the keyboard:**
 - Use the arrow keys to move selection (within the currently active pane).
-- Press Space to toggle the primary selection's state (Unclassified → Keep → Discard → Unclassified).
+- ⌥ (Option) + ↑/↓ moves the selection in the folder tree; ⌥ (Option) + →/← expands/collapses the selected folder.
+- ⌘1 marks the selection Keep, ⌘2 marks it Discard, ⌘0 resets it to Unclassified.
+- ⌘A selects all items in the active pane; ⌘D clears the current selection.
+- Press Space or Enter to open the magnified preview of the selected photo (press again to close it).
 
 ### 3. Move Discarded Photos
 
@@ -58,6 +62,24 @@ Additional behavior:
 - The currently active pane is lightly highlighted. Keyboard navigation (arrow keys) and Cmd+A operate on the active pane.
 - All grids (center, Keep, Discard) auto-scroll to keep the selected item visible.
 
+### Folder Tree
+
+Right-click a folder in the tree for a context menu:
+
+- **Finderで開く** (Open in Finder): reveals the folder in Finder.
+- **新規フォルダ** (New Folder): creates a new subfolder inside it, after prompting for a name.
+- **フォルダ名を変更** (Rename Folder): renames the folder. Disabled for the root folder you opened.
+- **フォルダを削除** (Delete Folder): moves the folder to the Trash after a confirmation dialog. Disabled for the root folder.
+
+Drag and drop:
+
+- Drag photos — from the grid, or from the Keep/Discard lists — onto a folder in the tree, or onto the photo grid itself, to move them into that folder.
+- Hold ⌥ (Option) while dropping to copy instead of move.
+- The app copies instead of moves automatically whenever the source or destination is on an external/removable volume.
+- Folders themselves (except the root folder) are draggable too, so you can drag a subfolder onto another folder to reorganize your library.
+- If an item with the same name already exists at the destination, a dialog offers **両方とも残す** (Keep Both), **置き換える** (Replace), or **中止** (Cancel), with a checkbox to apply the same choice to any remaining conflicts.
+- Moves and copies made this way can be undone with ⌘Z (redo with ⇧⌘Z).
+
 ### Toolbar & Menu
 
 - **Open Folder**: Opens a folder.
@@ -66,7 +88,7 @@ Additional behavior:
 - **Clear**: Resets all classifications.
 - **Photo Count**: Shows the number of currently loaded photos.
 - **Move Discarded**: Moves discarded photos (see destination policy above).
-- Menu bar "仕分け" provides the same Keep / Discard / Reset actions and "Select All" (⌘A) that operate on the active pane.
+- Menu bar "仕分け" (Sorting) provides Keep (⌘1) / Discard (⌘2) / Reset (⌘0), plus "Select All" (⌘A) and "Deselect" (⌘D), all operating on the active pane.
 
 ## Keyboard Shortcuts
 
@@ -75,24 +97,31 @@ Additional behavior:
 | Key | Action |
 |------|------|
 | ↑ / ↓ / ← / → | Move selection within the active pane |
+| ⌥ (Option) + ↑ / ↓ | Move the selection up/down in the folder tree |
+| ⌥ (Option) + → / ← | Expand / collapse the selected folder |
 | ⌘A | Select all items in the active pane |
+| ⌘D | Clear the current selection |
 
 ### Photo Actions
 
 | Key | Action |
 |------|------|
-| Space | Toggle the primary selection's state (Unclassified→Keep→Discard) |
-| Enter | Open the selected photo in a magnified view |
+| ⌘1 | Mark the selection as Keep |
+| ⌘2 | Mark the selection as Discard |
+| ⌘0 | Reset the selection to Unclassified |
+| Space / Enter | Open the magnified preview of the selected photo (press again to close it) |
+
+Note: clicking no longer cycles a photo's state — use ⌘1 / ⌘2 / ⌘0, the right-click context menu, or the "仕分け" menu.
 
 ### Magnified View Actions
 
 | Key | Action |
 |------|------|
-| Enter | Close the magnified view |
+| Space / Enter | Close the magnified view |
 | ⌘W | Close the magnified view |
-| Double Tap | Reset zoom and position |
+| Double-click | Toggle between "fit to window" and 100% (actual pixel) zoom |
 | Pinch | Zoom in/out |
-| Two-finger drag | Pan the image |
+| Click-and-drag, or two-finger scroll | Pan the image when zoomed in |
 
 ## How to Classify Photos
 
@@ -103,12 +132,12 @@ Additional behavior:
 
 2. **Quick Classification**
    - Use the arrow keys to quickly go through photos.
-   - Use the Space key to instantly decide to keep or discard.
+   - Use ⌘1 / ⌘2 (or the right-click menu, or the "仕分け" menu) to instantly mark a photo Keep or Discard.
    - If you're unsure, leave it as unclassified.
 
 3. **Check the Preview**
    - Use the preview panel on the right for a larger view.
-   - Press Enter for an even larger view.
+   - Press Space or Enter for an even larger (magnified) view.
 
 4. **Final Check**
    - Review the discard list in the lower right.
@@ -118,6 +147,23 @@ Additional behavior:
 
 6. **Re-review Unclassified**
    - Go over the remaining unclassified photos.
+
+## RAW File Support
+
+In addition to standard image formats, photoSelector reads major camera RAW formats directly (decoded via macOS's built-in ImageIO RAW support, so no conversion is needed):
+
+- Canon: CR2, CR3
+- Nikon: NEF, NRW
+- Sony: ARW
+- Fujifilm: RAF
+- OM System / Olympus: ORF
+- Panasonic: RW2
+- Pentax: PEF
+- Adobe / Leica and others: DNG
+
+RAW files are marked with a small "RAW" badge on their thumbnail so they're easy to tell apart from a JPEG of the same shot at a glance.
+
+If a thumbnail fails to decode (corrupt file, unsupported variant, unreadable media), a warning icon is shown in place of the thumbnail instead of spinning indefinitely.
 
 ## Layout Customization
 
@@ -141,13 +187,21 @@ All three dividers in the app can be adjusted by dragging:
 
 ## Settings Persistence
 
-The following settings are automatically saved and restored on the next launch:
+While the app is running, each window remembers its own divider positions and window size as you adjust them. On its own, however, this is **not** carried over the next time you launch the app — every launch starts a fresh window.
+
+To make your current layout persist across launches (and apply to any additional window you open), use the menu bar **Window → "現在の設定とレイアウトをデフォルトにする"** ("Make Current Settings and Layout the Default"). This saves:
 
 - All split view divider positions (main left/right, right panel top/bottom, keep/discard split)
 - Thumbnail size (slider position)
-- Magnified view window size
+- Date sort mode (File / EXIF)
+- The sidebar EXIF pane height
+- The main window's size
 
-Settings are saved automatically when you change them.
+The saved layout is then applied automatically to every new window — including the one that opens the next time you launch the app. Run the command again whenever you want to update the saved default to your current arrangement.
+
+Separately, the Light/Dark appearance mode (set from the menu bar) is always remembered automatically and does not require this step.
+
+The magnified view window's size and position are also saved automatically, independent of the above, and restored the next time you open it.
 
 ## Sorting
 
@@ -160,7 +214,7 @@ Settings are saved automatically when you change them.
 ### Efficient Classification
 
 1. **Use Keyboard Shortcuts**
-   - Classify photos quickly using only the arrow keys and the Space key.
+   - Classify photos quickly using the arrow keys plus ⌘1 / ⌘2 / ⌘0.
 
 2. **Auto-Scroll**
    - The grid automatically scrolls to keep the selected photo in view.
@@ -170,7 +224,7 @@ Settings are saved automatically when you change them.
 
 4. **Use the Preview**
    - The preview panel always shows the selected photo.
-   - Press Enter to toggle the magnified view.
+   - Press Space or Enter to toggle the magnified view.
 
 5. **Classify in Stages**
    - First pass: Classify obvious discards.
@@ -181,8 +235,9 @@ Settings are saved automatically when you change them.
 
 ### Photos Not Displaying
 
-- Check if the image format is supported (JPG, PNG, HEIC, GIF, TIFF).
+- Check if the image format is supported (JPG, PNG, HEIC, GIF, TIFF, or one of the [supported RAW formats](#raw-file-support)).
 - Check the folder's read permissions.
+- If a thumbnail shows a warning icon instead of the image, the file failed to decode (it may be corrupt or an unsupported RAW variant).
 
 ### Keyboard Not Responding
 
@@ -196,7 +251,7 @@ Settings are saved automatically when you change them.
 ## System Requirements
 
 - macOS 26.1 or later
-- Supported formats: JPG, JPEG, PNG, HEIC, GIF, TIFF
+- Supported formats: JPG, JPEG, PNG, HEIC, GIF, TIFF, and the RAW formats listed in [RAW File Support](#raw-file-support)
 
 ## Privacy and Security
 
@@ -207,4 +262,4 @@ Settings are saved automatically when you change them.
 
 ---
 
-If you have any questions or issues, please report them in the GitHub repository's Issues section.
+The app's "About photoSelector" panel (photoSelector menu) links to the GitHub repository. If you have any questions or issues, please report them in the repository's Issues section: https://github.com/etokoji/photoselector
