@@ -1,0 +1,129 @@
+tmpファイルが作成される問題の検討メモ
+
+1. 事象の概要
+
+アプリのサンドボックスコンテナの tmp に、CFNetworkDownload_*.tmp が残留することがあった。
+
+確認された特徴:
+- 拡張子を .jpg に変更すると画像として開ける。中身は完全な JPEG だった。
+- ネットワークボリューム、iCloud Drive の未ダウンロード項目、SD カードなどで発生していた。
+- サムネールを選択してサイドパネルのプレビューに表示したタイミングで発生した。
+- 同じサムネールを再選択しても、新しい CFNetworkDownload_*.tmp が作成された。
+- 起動時に tmp を削除する処理は導入済み。
+  - photoSelectorApp.swift の photoSelectorApp.init()
+
+2. 当初の切り分け
+
+サムネール生成は主因ではなさそうだった。
+
+該当箇所:
+- PhotoSorterViewModel.swift
+- ThumbnailGenerator
+- CGImageSourceCreateWithURL
+- CGImageSourceCreateThumbnailAtIndex
+
+理由:
+- サムネール生成は短いスコープで完結する。
+- サムネール側の処理では、選択のたびに CFNetworkDownload_*.tmp が増える挙動とは一致しにくかった。
+
+EXIF 読み出しも主因ではなさそうだった。
+
+該当箇所:
+- PhotoSorterViewModel.swift
+- loadPhotos(from:) の .exifPreferred ソート
+- CGImageSourceCopyPropertiesAtIndex
+
+理由:
+- ソートを EXIF 優先にしても、tmp 作成は再現しなかった。
+
+3. 怪しかった箇所
+
+サイドパネルの簡易プレビューが AsyncImage(url:) を使っていた。
+
+該当箇所:
+- ContentView.swift
+- SelectedPhotoPreview
+- 変更前: AsyncImage(url: photo.url)
+
+観察された挙動:
+- サムネール選択時に、サイドパネルのプレビューが URL から画像を読み込む。
+- このタイミングで CFNetworkDownload_*.tmp が作成されていた。
+- 同じ画像を再選択しても tmp が増えたため、AsyncImage 側の URL ローダが毎回一時コピーを作っている可能性が高いと考えた。
+
+4. 試した対策
+
+サイドパネルの SelectedPhotoPreview から AsyncImage(url:) を除去し、Data -> NSImage 経由の読み込みに変更した。
+
+変更内容:
+- ContentView.swift
+- SelectedPhotoPreview で PreviewImageView(url:) を使うように変更。
+- PreviewImageView を追加。
+
+PreviewImageView の読み込みフロー:
+- .task(id: url) で URL が変わるたびに読み込み。
+- Task.detached(priority: .userInitiated) でバックグラウンド読み込み。
+- autoreleasepool 内で Data(contentsOf: url, options: [.mappedIfSafe]) を実行。
+- 読み込んだ Data から NSImage(data:) を生成。
+- 読み込み中は ProgressView を表示。
+- 読み込み失敗時は従来と同じ失敗表示。
+
+サイズ閾値:
+- 今回は設けていない。
+- 実測でメモリ増加が大きくなかったため、現時点では追加不要と判断。
+
+5. 検証結果
+
+サイドパネルのプレビュー:
+- Data(contentsOf: url, options: [.mappedIfSafe]) -> NSImage(data:) 方式に変更後、CFNetworkDownload_*.tmp は作成されなかった。
+- メモリ増加もあまり見られなかった。
+- よって、サイドパネルではこの方式を採用してよさそう。
+
+拡大ウインドウのプレビュー:
+- ImagePreviewWindow.swift の ZoomableAsyncImageView は、現時点では NSImage(contentsOf: url) のまま。
+- 拡大ウインドウで画像を表示しても CFNetworkDownload_*.tmp は作成されなかった。
+- したがって、拡大ウインドウ側は現状維持でよい。
+
+ビルド確認:
+- 以下のコマンドで Debug ビルド成功を確認済み。
+
+  env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -project photoSelector.xcodeproj -scheme photoSelector -configuration Debug -derivedDataPath /private/tmp/photoSelectorDerivedData build
+
+6. 現時点の結論
+
+今回の CFNetworkDownload_*.tmp 作成は、URL 直読み全般の問題というより、サイドパネルで使用していた AsyncImage(url:) の URL ロード経路に強く関連していた可能性が高い。
+
+根拠:
+- AsyncImage(url:) を Data -> NSImage 経由に置き換えると、サイドパネル選択時の tmp 作成が止まった。
+- 同じ URL 直読み系でも、拡大ウインドウの NSImage(contentsOf:) では tmp 作成が確認されなかった。
+- サムネール生成や EXIF 読み出しでは、同じ現象は再現しなかった。
+
+7. 今後の方針
+
+採用する変更:
+- サイドパネルの簡易プレビューは PreviewImageView(url:) を正式採用する。
+- AsyncImage(url:) には戻さない。
+
+現状維持する箇所:
+- 拡大ウインドウの ZoomableAsyncImageView は NSImage(contentsOf:) のままにする。
+- tmp が作成されないことを確認済みなので、不要な変更はしない。
+
+当面不要な対策:
+- 拡大ウインドウ側の Data 経由化。
+- バックグラウンドでの定期的な tmp クリーン。
+- プレビュー画像の NSCache 化。
+- サイズ閾値の導入。
+
+ただし、以下の場合は再検討する:
+- 非常に大きな画像でメモリ増加が目立つ。
+- 特定の保存先やファイル形式で tmp 作成が再発する。
+- 拡大ウインドウ側でも同様の tmp 作成が確認される。
+
+8. 確認ポイント
+
+今後同じ問題を確認するときは、以下を見る。
+
+- サンドボックスコンテナの tmp に CFNetworkDownload_*.tmp が増えるか。
+- サイドパネルで選択を繰り返したときに増えるか。
+- 拡大ウインドウ表示で増えるか。
+- iCloud Drive 未ダウンロード項目、ネットワークボリューム、SD カードで挙動が変わるか。
+- Activity Monitor などでメモリ使用量が継続的に増え続けないか。
