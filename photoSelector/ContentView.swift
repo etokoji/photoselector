@@ -1709,6 +1709,7 @@ struct PhotoGridView: View {
                     Picker("ソート方法", selection: $sortMode) {
                         Text("ファイル日付順").tag(DateSortMode.fileCreation)
                         Text("EXIF日付順").tag(DateSortMode.exifPreferred)
+                        Text("ファイル種別順").tag(DateSortMode.fileType)
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)

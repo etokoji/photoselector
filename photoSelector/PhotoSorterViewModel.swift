@@ -273,11 +273,13 @@ enum SelectionContext {
 enum DateSortMode: String, CaseIterable, Identifiable {
     case fileCreation = "file"
     case exifPreferred = "exif"
+    case fileType = "type"
     var id: String { rawValue }
     var label: String {
         switch self {
         case .fileCreation: return "File"
         case .exifPreferred: return "EXIF"
+        case .fileType: return "Type"
         }
     }
 }
@@ -944,6 +946,10 @@ struct FolderPaneState: Identifiable, Equatable {
                     let db = exifDate(b) ?? ((try? b.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date.distantFuture)
                     return (da, a.standardizedFileURL.path) < (db, b.standardizedFileURL.path)
                 }
+            case .fileType:
+                sortedURLs = imageFiles.sorted { a, b in
+                    (a.pathExtension.lowercased(), a.standardizedFileURL.path) < (b.pathExtension.lowercased(), b.standardizedFileURL.path)
+                }
             }
             
             let items = sortedURLs.map { PhotoItem(url: $0) }
@@ -985,17 +991,18 @@ struct FolderPaneState: Identifiable, Equatable {
     
     private func sortedPhotos(_ photos: [PhotoItem]) -> [PhotoItem] {
         photos.sorted { a, b in
-            let da: Date
-            let db: Date
             switch sortMode {
             case .fileCreation:
-                da = a.fileCreationDate ?? .distantFuture
-                db = b.fileCreationDate ?? .distantFuture
+                let da = a.fileCreationDate ?? .distantFuture
+                let db = b.fileCreationDate ?? .distantFuture
+                return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
             case .exifPreferred:
-                da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
-                db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
+                let da = (a.exifCreationDate ?? a.fileCreationDate) ?? .distantFuture
+                let db = (b.exifCreationDate ?? b.fileCreationDate) ?? .distantFuture
+                return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
+            case .fileType:
+                return (a.url.pathExtension.lowercased(), a.url.standardizedFileURL.path) < (b.url.pathExtension.lowercased(), b.url.standardizedFileURL.path)
             }
-            return (da, a.url.standardizedFileURL.path) < (db, b.url.standardizedFileURL.path)
         }
     }
     
@@ -1872,6 +1879,8 @@ struct FolderPaneState: Identifiable, Equatable {
             return photo.fileCreationDate
         case .exifPreferred:
             return photo.exifCreationDate ?? photo.fileCreationDate
+        case .fileType:
+            return photo.fileCreationDate
         }
     }
     
